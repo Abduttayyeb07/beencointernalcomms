@@ -1,0 +1,52 @@
+name: beenco-connect-local
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: beenco
+      POSTGRES_USER: beenco
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5445:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U beenco -d beenco"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  portal:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - ../../.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4173
+      PORTAL_DATA_DIR: /data
+      PORTAL_ADMIN_EMAIL: ${PORTAL_ADMIN_EMAIL:-admin@beenco.local}
+      PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:-Change@123}
+      DATABASE_URL: postgresql://beenco:${POSTGRES_PASSWORD}@postgres:5432/beenco
+    ports:
+      - "${PORTAL_PORT:-4173}:4173"
+    volumes:
+      - portal-data:/data
+      - ../../apps:/app/apps
+      - ../../run_briefing.py:/app/run_briefing.py
+      - ../../artifact_updater.py:/app/artifact_updater.py
+      - ../../bedrock_client.py:/app/bedrock_client.py
+      - ../../config.py:/app/config.py
+      - ../../data_fetcher.py:/app/data_fetcher.py
+      - ../../blockchain-briefing-live.html:/app/blockchain-briefing-live.html
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  portal-data:

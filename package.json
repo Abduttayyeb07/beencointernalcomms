@@ -1,0 +1,18 @@
+{
+  "name": "beenco-connect",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-hosted Beenco intranet communication and collaboration portal.",
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "portal": "py apps/api/portal_server.py",
+    "web:static": "py -m http.server 4173 --directory apps/web",
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "lint": "turbo lint"
+  },
+  "devDependencies": {
+    "turbo": "latest"
+  }
+}

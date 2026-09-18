@@ -1,0 +1,41 @@
+{
+  "realm": "beenco",
+  "enabled": true,
+  "displayName": "Beenco",
+  "loginWithEmailAllowed": true,
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "clients": [
+    {
+      "clientId": "beenco-connect-web",
+      "name": "Beenco Connect Web",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "https://connect.beenco.local/*",
+        "http://localhost:4173/*"
+      ],
+      "webOrigins": [
+        "https://connect.beenco.local",
+        "http://localhost:4173"
+      ]
+    }
+  ],
+  "groups": [
+    { "name": "admin" },
+    { "name": "dev" },
+    { "name": "creatives" },
+    { "name": "it" }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "super_admin" },
+      { "name": "admin" },
+      { "name": "moderator" },
+      { "name": "member" },
+      { "name": "guest" }
+    ]
+  }
+}

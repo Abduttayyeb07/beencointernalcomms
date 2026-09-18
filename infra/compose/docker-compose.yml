@@ -1,0 +1,176 @@
+name: beenco-connect
+
+services:
+  traefik:
+    image: traefik:v3.1
+    command:
+      - --providers.docker=true
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --api.dashboard=true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../traefik:/etc/traefik/dynamic:ro
+    networks:
+      - connect
+
+  web:
+    image: nginx:1.27-alpine
+    volumes:
+      - ../../apps/web:/usr/share/nginx/html:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.connect-web.rule=Host(`connect.beenco.local`)
+      - traefik.http.routers.connect-web.entrypoints=websecure
+      - traefik.http.services.connect-web.loadbalancer.server.port=80
+    networks:
+      - connect
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - ../../.env
+    environment:
+      PORT: 4173
+      PORTAL_DATA_DIR: /data
+      DATABASE_URL: ${DATABASE_URL}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-https://connect.beenco.local/api/auth/google/callback}
+    volumes:
+      - portal-data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.connect-api.rule=Host(`connect.beenco.local`) && PathPrefix(`/api`)
+      - traefik.http.routers.connect-api.entrypoints=websecure
+      - traefik.http.services.connect-api.loadbalancer.server.port=4173
+    networks:
+      - connect
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+    volumes:
+      - ../keycloak:/opt/keycloak/data/import:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.connect-auth.rule=Host(`auth.beenco.local`)
+      - traefik.http.routers.connect-auth.entrypoints=websecure
+      - traefik.http.services.connect-auth.loadbalancer.server.port=8080
+    networks:
+      - connect
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: beenco
+      POSTGRES_USER: beenco
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-keycloak.sql:/docker-entrypoint-initdb.d/init-keycloak.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U beenco -d beenco"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - connect
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - connect
+
+  opensearch:
+    image: opensearchproject/opensearch:2
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - connect
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: beenco
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.connect-files.rule=Host(`files.beenco.local`)
+      - traefik.http.routers.connect-files.entrypoints=websecure
+      - traefik.http.services.connect-files.loadbalancer.server.port=9000
+    networks:
+      - connect
+
+  clamav:
+    image: clamav/clamav:stable
+    networks:
+      - connect
+
+  livekit:
+    image: livekit/livekit-server:v1.8
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ../livekit/livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-60000:50000-60000/udp"
+    networks:
+      - connect
+
+  coturn:
+    image: coturn/coturn:4
+    command: -c /etc/coturn/turnserver.conf
+    volumes:
+      - ../livekit/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "5349:5349"
+    networks:
+      - connect
+
+volumes:
+  postgres-data:
+  redis-data:
+  opensearch-data:
+  minio-data:
+  portal-data:
+
+networks:
+  connect:
+    driver: bridge

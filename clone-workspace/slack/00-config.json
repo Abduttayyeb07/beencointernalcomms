@@ -1,0 +1,14 @@
+{
+  "target_url": "https://app.slack.com/client/",
+  "scope": "interactive",
+  "product_scope": "Chat-only Beenco Connect; preserve existing backend and user data",
+  "browser": "User-approved isolated Chromium via Playwright CDP on loopback",
+  "theme": "dark via browser prefers-color-scheme emulation",
+  "viewports": {
+    "desktop": {"width": 1920, "height": 1080},
+    "tablet": {"width": 768, "height": 1024},
+    "mobile": {"width": 375, "height": 667}
+  },
+  "exclusions": ["Billing", "Apps marketplace", "AI agents", "External integrations", "Sending Slack messages", "Changing Slack workspace settings"],
+  "privacy": "Raw style captures and screenshots stay in git-ignored 01-recon. No cookies, tokens, passwords, or storage are extracted."
+}

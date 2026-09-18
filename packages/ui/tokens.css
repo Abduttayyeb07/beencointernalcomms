@@ -1,0 +1,21 @@
+:root {
+  --beenco-lime: #c4f82a;
+  --beenco-lime-bright: #d6ff4d;
+  --beenco-lime-dim: #9ccb1f;
+  --beenco-lime-soft: rgba(196, 248, 42, 0.12);
+  --bg-base: #0a0a0a;
+  --bg-surface: #141414;
+  --bg-elevated: #1e1e1e;
+  --border: #2a2a2a;
+  --text-primary: #f5f5f5;
+  --text-secondary: #a3a3a3;
+  --text-muted: #6b6b6b;
+  --success: #c4f82a;
+  --warning: #ffc857;
+  --danger: #ff5c5c;
+  --info: #5cc8ff;
+  --online: #c4f82a;
+  --away: #ffc857;
+  --dnd: #ff5c5c;
+  --offline: #6b6b6b;
+}

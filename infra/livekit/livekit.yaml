@@ -1,0 +1,15 @@
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: false
+keys:
+  replace-with-livekit-api-key: replace-with-livekit-api-secret
+turn:
+  enabled: true
+  domain: media.beenco.local
+  tls_port: 5349
+  udp_port: 3478

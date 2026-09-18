@@ -1,0 +1,8 @@
+{
+  "recon": "partial-review",
+  "extraction": "not-started",
+  "design_spec": "not-started",
+  "build": "not-started",
+  "qa": "not-started",
+  "note": "Live styling confirmed. Full interaction coverage has not passed; see progress.md."
+}

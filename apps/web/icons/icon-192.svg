@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="Beenco Connect">
+  <rect width="192" height="192" rx="36" fill="#0A0A0A"/>
+  <path d="M44 52h64c24 0 40 13 40 33 0 12-6 23-18 29 15 5 24 17 24 34 0 23-18 38-47 38H44V52Zm34 29v23h27c10 0 16-4 16-12s-6-11-16-11H78Zm0 51v25h31c11 0 17-5 17-13 0-7-6-12-17-12H78Z" fill="#C4F82A"/>
+  <circle cx="143" cy="48" r="13" fill="#D6FF4D"/>
+</svg>

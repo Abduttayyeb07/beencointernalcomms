@@ -1,0 +1,10 @@
+<decoder name="beenco-connect-json">
+  <prematch>^\{.*"source":"beenco-connect".*</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<decoder name="beenco-connect-audit">
+  <parent>beenco-connect-json</parent>
+  <regex>"action":"([^"]+)".*"targetType":"([^"]+)".*"targetId":"([^"]+)"</regex>
+  <order>beenco_action,beenco_target_type,beenco_target_id</order>
+</decoder>

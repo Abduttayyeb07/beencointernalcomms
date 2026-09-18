@@ -1,0 +1,9 @@
+{
+  "name": "@beenco/api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "python portal_server.py"
+  }
+}

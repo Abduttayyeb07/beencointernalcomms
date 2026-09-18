@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" role="img" aria-labelledby="title desc">
+  <title id="title">Beenco Labs command center visual</title>
+  <desc id="desc">A dark Beenco Labs brand visual with a sculptural bust, lime light beam, and workspace mark.</desc>
+  <defs>
+    <radialGradient id="smoke" cx="42%" cy="34%" r="70%">
+      <stop offset="0" stop-color="#2b2b2b" stop-opacity=".9"/>
+      <stop offset=".45" stop-color="#131313" stop-opacity=".68"/>
+      <stop offset="1" stop-color="#050505" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="lime" x1="0" x2="1">
+      <stop offset="0" stop-color="#d6ff4d"/>
+      <stop offset=".52" stop-color="#c4f82a"/>
+      <stop offset="1" stop-color="#8bc414" stop-opacity=".05"/>
+    </linearGradient>
+    <linearGradient id="stone" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#777"/>
+      <stop offset=".26" stop-color="#3a3a3a"/>
+      <stop offset=".72" stop-color="#151515"/>
+      <stop offset="1" stop-color="#070707"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.77 0 0 0 0 0.97 0 0 0 0 0.08 0 0 0 .9 0"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="960" height="520" fill="#050505"/>
+  <ellipse cx="500" cy="210" rx="460" ry="250" fill="url(#smoke)" opacity=".85"/>
+  <path d="M503 130 C610 114 730 115 875 150 C752 158 629 163 516 178 Z" fill="url(#lime)" opacity=".78" filter="url(#glow)"/>
+  <path d="M413 126 C431 82 477 55 528 63 C579 72 616 112 614 158 C610 237 558 276 493 273 C443 271 402 237 391 188 C384 157 390 139 413 126 Z" fill="url(#stone)"/>
+  <path d="M412 113 C428 72 462 50 505 48 C552 47 595 73 610 113 C572 91 547 94 520 86 C494 77 456 83 412 113 Z" fill="#585858"/>
+  <path d="M390 252 C458 292 554 292 624 254 C666 303 696 370 701 452 C560 493 428 493 292 452 C302 360 335 302 390 252 Z" fill="url(#stone)"/>
+  <path d="M377 318 C444 343 548 341 636 310 C610 366 557 397 477 398 C420 399 379 372 347 335 Z" fill="#222" opacity=".88"/>
+  <path d="M390 149 C463 139 535 139 607 150 L604 169 C531 164 462 164 392 169 Z" fill="#c4f82a" filter="url(#glow)"/>
+  <path d="M394 170 C463 162 532 162 602 170" fill="none" stroke="#e4ff66" stroke-width="6" stroke-linecap="round" opacity=".82"/>
+  <circle cx="328" cy="268" r="52" fill="#c4f82a" opacity=".94"/>
+  <path d="M137 426 C222 392 322 385 397 404 C479 425 555 420 651 382" fill="none" stroke="#f7f7f7" stroke-width="13" stroke-linecap="round" opacity=".95"/>
+  <path d="M119 408 C170 363 220 347 274 368 C316 384 311 435 252 448 C207 457 161 446 119 408 Z" fill="none" stroke="#c4f82a" stroke-width="23" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M286 413 C333 345 421 338 405 420 C390 491 476 388 516 370 C545 356 561 372 547 400 C529 438 570 416 596 384 C621 353 652 364 637 400 C624 430 671 407 708 367" fill="none" stroke="#c4f82a" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="704" y="433" fill="#f7f7f7" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="82" font-weight="800" transform="rotate(-8 704 433)">Labs</text>
+  <circle cx="850" cy="438" r="10" fill="#c4f82a"/>
+</svg>

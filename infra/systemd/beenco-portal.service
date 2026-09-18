@@ -1,0 +1,39 @@
+[Unit]
+Description=Beenco Connect Portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beenco
+Group=beenco
+WorkingDirectory=/opt/beenco-connect
+# Uses the repo's own venv (created by infra/linux/install.sh), not system Python — that venv
+# is where psycopg and python-dotenv, both required to reach the PostgreSQL database, are
+# installed. DATABASE_URL and every other setting come from /opt/beenco-connect/.env, which the
+# app loads itself on startup; there is no local database file for this service to manage.
+ExecStart=/opt/beenco-connect/.venv/bin/python3 /opt/beenco-connect/apps/api/portal_server.py
+Restart=on-failure
+RestartSec=5
+Environment="HOST=127.0.0.1"
+Environment="PORT=4173"
+Environment="PORTAL_DATA_DIR=/var/lib/beenco"
+Environment="AUDIT_LOG_PATH=/var/log/beenco/audit.json"
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/beenco /var/log/beenco
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

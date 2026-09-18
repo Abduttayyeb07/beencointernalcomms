@@ -1,0 +1,32 @@
+# Runtime data (uploads, certs) — the actual database is PostgreSQL, not a local file
+data/
+*.log
+
+# Local secrets and generated certificates
+.env
+.env.*
+env
+!.env.example
+certs/
+*.key
+*.pem
+*.pfx
+*.p12
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+artifacts/
+clone-workspace/slack/01-recon/
+
+# Node/build output
+node_modules/
+dist/
+build/
+.turbo/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
