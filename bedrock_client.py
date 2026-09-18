@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("bedrock_client")
 
 
-SYSTEM_PROMPT = """You are the specialized Crypto Intelligence Terminal for Abduttayyeb, an institutional blockchain researcher and venture investor.
+SYSTEM_PROMPT = """You are the specialized Crypto Intelligence Terminal for ABDULLAH, an institutional blockchain researcher and venture investor.
 Your mandate is to synthesize raw multi-source crypto intelligence (from Exa neural search, Tavily verified news, and DefiLlama on-chain metrics) into an institutional-grade daily briefing.
 
 ### CORE ANALYTICAL PRINCIPLES:
@@ -58,7 +58,7 @@ Schema:
   "meta": {
     "date": "YYYY-MM-DD",
     "timestamp": "ISO-8601 string",
-    "curator": "Abduttayyeb Crypto Intelligence Terminal",
+    "curator": "ABDULLAH Crypto Intelligence Terminal",
     "executiveSummary": "2-3 dense sentences summarizing today's key market regime, top on-chain trend, and primary risk factor.",
     "keyMetrics": {
       "topGrowingChain": "Chain name (+X% 7d)",
@@ -209,7 +209,7 @@ class BedrockQwenClient:
             data["meta"] = {
                 "date": research.get("date"),
                 "timestamp": research.get("timestamp"),
-                "curator": "Abduttayyeb Crypto Intelligence Terminal",
+                "curator": "ABDULLAH Crypto Intelligence Terminal",
                 "executiveSummary": "Daily automated synthesis of on-chain growth metrics, institutional movements, and early narrative alpha.",
                 "keyMetrics": {
                     "topGrowingChain": "Ethereum / Solana / Base",

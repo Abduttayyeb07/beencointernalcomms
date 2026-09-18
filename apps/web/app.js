@@ -16,7 +16,6 @@ const state = {
   selectedThreadId: null,
   editingMessageId: null,
   editDraft: "",
-  sidebarFilter: "",
   searchQuery: "",
   recentSearches: loadRecentSearches(),
   composerDrafts: {},
@@ -45,8 +44,26 @@ const state = {
   previewFile: null,
   previewFileContent: null,
   previewFileLoading: false,
-  pendingAttachments: []
+  pendingAttachments: [],
+  // { start: <index of "@" in the draft text>, query: <text typed after "@">, activeIndex: <highlighted row> }
+  mentionSuggest: null,
+  emojiPickerOpen: false
 };
+
+// A curated, scrollable grid — not the whole Unicode emoji block, just enough common ones that
+// the picker is actually useful instead of one fixed smiley.
+const EMOJI_PICKER_SET = [
+  "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "🤩",
+  "😘", "😗", "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🤫", "🤔", "🤐", "🤨", "😐", "😑",
+  "😶", "😏", "😒", "🙄", "😬", "🤥", "😌", "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🥳",
+  "😎", "🤓", "🧐", "😕", "😟", "🙁", "😮", "😯", "😲", "😳", "🥺", "😦", "😧", "😨", "😰", "😥",
+  "😢", "😭", "😱", "😖", "😣", "😞", "😓", "😩", "😫", "🥱", "😤", "😡", "😠", "🤬", "😈", "👿",
+  "💀", "👻", "👽", "🤖", "🎃", "😺", "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾",
+  "👍", "👎", "👏", "🙌", "👐", "🤝", "🙏", "💪", "🤞", "✌️", "🤟", "🤙", "👌", "🫡", "👊", "✊",
+  "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️", "💕", "💞", "💓", "💗", "💖",
+  "🔥", "✨", "🎉", "🎊", "🎈", "🎁", "🏆", "⭐", "🌟", "💯", "✅", "❌", "❗", "❓", "💡", "⚡",
+  "☕", "🍕", "🍔", "🍟", "🍩", "🍺", "🍻", "🥂", "🚀", "🛠️", "📌", "📎", "📝", "📅", "⏰", "👀"
+];
 
 let data = emptyData();
 let mediaRecorder = null;
@@ -115,6 +132,34 @@ async function apiForm(path, formData) {
   const payload = contentType.includes("application/json") ? await response.json() : {};
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
+}
+
+// fetch() has no way to report upload progress — only XMLHttpRequest exposes byte-level progress
+// via xhr.upload.onprogress, which is what a large-file upload bar needs to be honest instead of
+// just guessing. onProgress receives (bytesSent, totalBytes).
+function apiFormWithProgress(path, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    xhr.withCredentials = true;
+    if (onProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(event.loaded, event.total);
+      };
+    }
+    xhr.onload = () => {
+      const contentType = xhr.getResponseHeader("content-type") || "";
+      let payload = {};
+      if (contentType.includes("application/json")) {
+        try { payload = JSON.parse(xhr.responseText || "{}"); } catch { payload = {}; }
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+      else reject(new Error(payload.error || `Request failed (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error("Network error during upload."));
+    xhr.onabort = () => reject(new Error("Upload cancelled."));
+    xhr.send(formData);
+  });
 }
 
 async function init() {
@@ -430,6 +475,120 @@ function activeChannelMembers() {
   // accounts (data.users only holds active ones) would count every stale id as a real member.
   const activeIds = new Set(data.users.map((user) => user.id));
   return (activeChannel().members || []).filter((id) => activeIds.has(id)).map(userById);
+}
+
+// Looks backward from the cursor for an "@" that starts the current word (preceded by
+// start-of-text or whitespace, with no whitespace between the "@" and the cursor). Returns
+// null when the cursor isn't inside a mention token, so normal typing never triggers a render.
+function mentionQueryAt(text, cursor) {
+  const uptoCursor = text.slice(0, cursor);
+  const match = uptoCursor.match(/(?:^|\s)@([\w.-]*)$/);
+  if (!match) return null;
+  return { start: cursor - match[1].length - 1, query: match[1] };
+}
+
+// Channel members plus the @channel/@here broadcast tokens (only meaningful outside DMs).
+// Filtering to activeChannelMembers() means #general — where every active user is already a
+// member — naturally lists everyone, with no separate "show all" case to maintain.
+function mentionCandidates(query) {
+  const channel = activeChannel();
+  const lowerQuery = query.toLowerCase();
+  const matches = (text) => text.toLowerCase().startsWith(lowerQuery);
+  const people = activeChannelMembers()
+    .filter((user) => matches(user.username) || matches(user.displayName))
+    .map((user) => ({ kind: "user", token: user.username, label: user.displayName, sublabel: `@${user.username}`, id: user.id }));
+  const broadcasts = ["dm", "group_dm"].includes(channel.type)
+    ? []
+    : [
+        { kind: "broadcast", token: "channel", label: "@channel", sublabel: "Notify everyone in this channel" },
+        { kind: "broadcast", token: "here", label: "@here", sublabel: "Notify everyone in this channel" }
+      ].filter((item) => matches(item.token));
+  return [...broadcasts, ...people].slice(0, 8);
+}
+
+function closeMentionSuggest() {
+  if (state.mentionSuggest) state.mentionSuggest = null;
+}
+
+const FORMAT_MARKERS = { bold: "**", italic: "*", code: String.fromCharCode(96) };
+
+// Figures out whether [start, end) in `value` is already wrapped by `marker`, checking both
+// ways a person might have it selected: the markers themselves included in the selection
+// ("**hello**"), or just the inner text with the markers sitting right outside it ("hello"
+// inside "**hello**"). Returns the full range including the markers plus the bare inner text,
+// so the caller can strip them regardless of which way the text was selected — or null if
+// `marker` doesn't wrap this range at all.
+function formatMarkerRange(value, start, end, marker) {
+  const m = marker.length;
+  // A single "*" (italic) must not be mistaken for one half of a "**" (bold) — otherwise bold
+  // text would light up the Italic button too, since the two markers share a character.
+  const startIsPartOfLongerRun = (pos) => m === 1 && value[pos + 1] === marker[0];
+  const endIsPartOfLongerRun = (pos) => m === 1 && value[pos - 1] === marker[0];
+
+  if (end - start >= m * 2 && value.slice(start, start + m) === marker && value.slice(end - m, end) === marker) {
+    if (!startIsPartOfLongerRun(start) && !endIsPartOfLongerRun(end - m)) {
+      return { start, end, inner: value.slice(start + m, end - m) };
+    }
+  }
+  const outerStart = start - m;
+  const outerEnd = end + m;
+  if (outerStart >= 0 && outerEnd <= value.length && value.slice(outerStart, start) === marker && value.slice(end, outerEnd) === marker) {
+    if (!startIsPartOfLongerRun(outerStart) && !endIsPartOfLongerRun(outerEnd - m)) {
+      return { start: outerStart, end: outerEnd, inner: value.slice(start, end) };
+    }
+  }
+  return null;
+}
+
+// The current selection (or, with nothing selected, the whole message — matching what clicking
+// a format button actually acts on) resolved the same way format-composer does, for reuse by
+// the toggle-button highlighting below.
+function currentFormatRange(input) {
+  let start = input.selectionStart;
+  let end = input.selectionEnd;
+  if (start === end && input.value.length > 0) {
+    start = 0;
+    end = input.value.length;
+  }
+  return { start, end };
+}
+
+// Lights up Bold/Italic/Code when the current selection is already formatted that way — done
+// as direct DOM class toggling, not through render(), so it can run on every selection change
+// without the cost or the cursor-jumping risk of a full page re-render.
+function updateFormatButtonStates() {
+  const input = document.querySelector('[data-action="composer-draft"]');
+  if (!input) return;
+  const { start, end } = currentFormatRange(input);
+  for (const format of Object.keys(FORMAT_MARKERS)) {
+    const btn = document.querySelector(`[data-action="format-composer"][data-format="${format}"]`);
+    if (!btn) continue;
+    const isActive = input.value.length > 0 && Boolean(formatMarkerRange(input.value, start, end, FORMAT_MARKERS[format]));
+    btn.classList.toggle("is-active", isActive);
+  }
+}
+
+function applyMentionSuggestion(token) {
+  const textarea = document.querySelector('[data-action="composer-draft"]');
+  const suggest = state.mentionSuggest;
+  if (!textarea || !suggest || !token) return;
+  const value = textarea.value;
+  // selectionStart survives a blur (e.g. the mousedown that precedes this click moving focus to
+  // the suggestion button), so this is still the cursor position from when "@" was being typed.
+  const cursor = textarea.selectionStart ?? value.length;
+  const before = value.slice(0, suggest.start);
+  const after = value.slice(cursor);
+  const inserted = `@${token} `;
+  const nextValue = `${before}${inserted}${after}`;
+  const nextCursor = before.length + inserted.length;
+  state.composerDrafts[state.activeChannelId] = nextValue;
+  state.mentionSuggest = null;
+  textarea.value = nextValue;
+  textarea.focus();
+  textarea.setSelectionRange(nextCursor, nextCursor);
+  // Re-render to remove the now-stale dropdown from the DOM; captureFocusState() will see this
+  // same textarea/value/selection (set above) and restoreFocusState() preserves them exactly.
+  render();
 }
 
 // Presence is fully automatic: online means active in the app within the last 5 minutes
@@ -1080,7 +1239,14 @@ function restoreFocusState(focusState) {
       element.value = state.composerDrafts[state.activeChannelId] || "";
       element.focus();
       const len = element.value.length;
-      if (typeof element.selectionStart === "number") {
+      // Re-renders triggered while actively typing (e.g. the mention-suggestion dropdown
+      // updating as you type) should keep the cursor exactly where it was, not jump to the
+      // end — captureFocusState() took this snapshot before the DOM was replaced, from the
+      // same textarea, so it's still valid as long as the text is unchanged since then.
+      const canRestoreExact = typeof focusState.selectionStart === "number" && focusState.value === element.value;
+      if (canRestoreExact) {
+        element.setSelectionRange(focusState.selectionStart, focusState.selectionEnd ?? focusState.selectionStart);
+      } else if (typeof element.selectionStart === "number") {
         element.setSelectionRange(len, len);
       }
     }
@@ -1351,7 +1517,7 @@ function renderIntranetAdminPortal() {
       </section>
       <section class="portal-columns">
         <div class="portal-panel"><h3>Feature Flags</h3>${Object.entries(data.featureFlags || {}).map(([key, value]) => `<label class="admin-row"><span><strong>${esc(key)}</strong><span>${value ? "enabled" : "disabled"}</span></span><input type="checkbox" data-action="flag-change" data-flag="${esc(key)}" ${value ? "checked" : ""} /></label>`).join("")}</div>
-        <div class="portal-panel"><h3>Moderation</h3>${recentMessages.map((message) => `<div class="admin-row"><div><strong>${esc(userById(message.authorId).displayName)}</strong><span>${esc(message.body).slice(0, 90)} ${message.deletedAt ? "- deleted" : ""}</span></div>${!message.deletedAt ? `<button class="danger-btn small-btn" data-action="delete-message" data-message-id="${message.id}">Delete</button>` : ""}</div>`).join("")}</div>
+        <div class="portal-panel"><h3>Moderation</h3>${recentMessages.map((message) => `<div class="admin-row"><div><strong>${esc(userById(message.authorId).displayName)}</strong><span>${esc(message.body).slice(0, 90)} ${message.deletedAt ? "- deleted" : ""}</span></div>${!message.deletedAt && message.authorId === currentUser().id ? `<button class="danger-btn small-btn" data-action="delete-message" data-message-id="${message.id}">Delete</button>` : ""}</div>`).join("")}</div>
       </section>
       <section class="portal-columns">
         <div class="portal-panel">
@@ -1559,15 +1725,12 @@ function renderNavSection(sectionId, label, addPanelId, addLabel, bodyHtml) {
 
 function renderSidebar() {
   const mode = state.workspaceMode || "home";
-  const filter = state.sidebarFilter.trim().toLowerCase();
-  const visible = data.channels.filter(channel => !filter || channelName(channel).toLowerCase().includes(filter));
-  const channels = visible.filter(channel => ["public", "private"].includes(channel.type));
-  const dms = visible.filter(channel => ["dm", "group_dm"].includes(channel.type));
+  const channels = data.channels.filter(channel => ["public", "private"].includes(channel.type));
+  const dms = data.channels.filter(channel => ["dm", "group_dm"].includes(channel.type));
   return `
     <aside class="sidebar ${state.ui.sidebarOpen ? "is-open" : ""}" aria-label="Workspace navigation">
       <div class="sidebar-top"><div class="workspace-title"><h1><span class="workspace-chevron">${chatIcon("chevronDown")}</span>${mode === "dms" ? "Direct messages" : "Beenco"}</h1></div><button class="icon-btn" data-action="open-panel" data-panel="people" aria-label="New message">${chatIcon("edit")}</button></div>
       <div class="sidebar-scroll">
-        <div class="quick-search"><input data-action="filter-sidebar" value="${esc(state.sidebarFilter)}" placeholder="${mode === "dms" ? "Find a DM…" : "Find a conversation…"}" aria-label="Find a conversation" /></div>
         <nav class="sidebar-shortcuts" aria-label="Chat shortcuts">
           <button data-action="workspace-view" data-view="calendar">${chatIcon("calendar")}Personal Calendar</button>
           ${isReportAdmin() ? `<button data-action="workspace-view" data-view="reports">${chatIcon("sparkles")}AI Weekly Reports</button>` : ""}
@@ -1972,14 +2135,18 @@ function renderReactions(message) {
 }
 
 function renderMessageActions(message, replyCount) {
-  const canChange = message.authorId === currentUser().id || isAdmin();
+  const isAuthor = message.authorId === currentUser().id;
+  // Editing and deleting are both author-only, with no admin override — neither action is
+  // offered on someone else's message, regardless of role.
+  const canEdit = isAuthor;
+  const canDelete = isAuthor;
   return `
     <div class="message-actions">
       <button class="chip" data-action="react" data-message-id="${message.id}" data-emoji="👍" aria-label="React with thumbs up">👍</button>
       <button class="chip" data-action="react" data-message-id="${message.id}" data-emoji="🔥" aria-label="React with fire">🔥</button>
       <button class="chip" data-action="open-thread" data-message-id="${message.id}">Thread ${replyCount ? `(${replyCount})` : ""}</button>
-      ${canChange && !message.deletedAt ? `<button class="chip" data-action="edit-message" data-message-id="${message.id}">Edit</button>` : ""}
-      ${canChange && !message.deletedAt ? `<button class="chip" data-action="delete-message" data-message-id="${message.id}">Delete</button>` : ""}
+      ${canEdit && !message.deletedAt ? `<button class="chip" data-action="edit-message" data-message-id="${message.id}">Edit</button>` : ""}
+      ${canDelete && !message.deletedAt ? `<button class="chip" data-action="delete-message" data-message-id="${message.id}">Delete</button>` : ""}
     </div>
   `;
 }
@@ -2024,6 +2191,7 @@ function renderComposer() {
   const draft = state.composerDrafts[channel.id] || "";
   return `
     <footer class="composer">
+      ${renderMentionSuggest()}
       <div class="composer-box ${state.composerUrgent ? "is-urgent-composer" : ""}">
         ${renderPendingAttachments()}
         <textarea data-action="composer-draft" placeholder="${disabled ? "Channel is locked" : esc(state.composerUrgent ? `⚠️ IMPORTANT message to ${channelName(channel)} (will ping Super Admin)` : `Message ${channelName(channel)}`)}" ${disabled ? "disabled" : ""}>${esc(draft)}</textarea>
@@ -2032,7 +2200,10 @@ function renderComposer() {
           <button class="icon-btn" data-action="format-composer" data-format="bold" title="Bold" aria-label="Bold" ${disabled ? "disabled" : ""}><strong>B</strong></button>
           <button class="icon-btn" data-action="format-composer" data-format="italic" title="Italic" aria-label="Italic" ${disabled ? "disabled" : ""}><em>I</em></button>
           <button class="icon-btn" data-action="format-composer" data-format="code" title="Code" aria-label="Code" ${disabled ? "disabled" : ""}>&lt;/&gt;</button>
-          <button class="icon-btn" data-action="format-composer" data-format="emoji" title="Insert smile" aria-label="Insert smile" ${disabled ? "disabled" : ""}>☺</button>
+          <div class="emoji-picker-anchor">
+            <button class="icon-btn ${state.emojiPickerOpen ? "is-active" : ""}" data-action="toggle-emoji-picker" title="Insert emoji" aria-label="Insert emoji" aria-expanded="${state.emojiPickerOpen}" ${disabled ? "disabled" : ""}>☺</button>
+            ${renderEmojiPicker()}
+          </div>
           <button class="icon-btn" data-action="toggle-voice" title="Voice message" aria-label="Voice message" ${disabled ? "disabled" : ""}>${state.voice.recording ? "Stop" : chatIcon("mic")}</button>
           <button class="urgent-toggle-btn ${state.composerUrgent ? "is-urgent-active" : ""}" data-action="toggle-urgent" title="Mark message as Important to Read (members ping every 30 minutes)" aria-label="Important to Read" ${disabled ? "disabled" : ""}>⚡ ${state.composerUrgent ? "Urgent / Important" : "Important"}</button>
           <button class="primary-btn" data-action="send-message" aria-label="Send message" ${disabled ? "disabled" : ""}>${chatIcon("send")}</button>
@@ -2045,6 +2216,37 @@ function renderComposer() {
       ${state.voice.recording ? renderWaveform(state.voice.waveform) : ""}
       ${renderUploads()}
     </footer>
+  `;
+}
+
+function renderMentionSuggest() {
+  const suggest = state.mentionSuggest;
+  if (!suggest) return "";
+  const candidates = mentionCandidates(suggest.query);
+  if (!candidates.length) return "";
+  const activeIndex = Math.min(suggest.activeIndex || 0, candidates.length - 1);
+  return `
+    <div class="mention-suggest" role="listbox" aria-label="Mention suggestions">
+      ${candidates.map((candidate, index) => `
+        <button type="button" class="mention-suggest-item ${index === activeIndex ? "is-active" : ""}" role="option" aria-selected="${index === activeIndex}" data-action="select-mention" data-mention-token="${esc(candidate.token)}">
+          ${candidate.kind === "user" ? `<span class="avatar tiny">${initials(candidate.label)}</span>` : `<span class="mention-suggest-broadcast">@</span>`}
+          <span class="mention-suggest-label"><strong>${esc(candidate.label)}</strong><small>${esc(candidate.sublabel)}</small></span>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderEmojiPicker() {
+  if (!state.emojiPickerOpen) return "";
+  return `
+    <div class="emoji-picker" role="listbox" aria-label="Emoji picker">
+      <div class="emoji-picker-grid">
+        ${EMOJI_PICKER_SET.map((emoji) => `
+          <button type="button" class="emoji-picker-item" data-action="insert-emoji" data-emoji="${esc(emoji)}" aria-label="Insert ${esc(emoji)}">${emoji}</button>
+        `).join("")}
+      </div>
+    </div>
   `;
 }
 
@@ -3618,7 +3820,7 @@ function renderBriefingView() {
       <div class="briefing-header-bar" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;background:#0d0d14;border:1px solid #1f1f33;border-radius:8px;padding:10px 16px;">
         <div>
           <div style="font-weight:700;font-size:0.95rem;color:#00e5ff;letter-spacing:0.04em;display:flex;align-items:center;gap:8px;">
-            <span>⚡</span> ABDUTTAYYEB BLOCKCHAIN INTELLIGENCE RADAR
+            <span>⚡</span> ABDULLAH BLOCKCHAIN INTELLIGENCE RADAR
           </div>
           <div style="font-size:0.75rem;color:#94a3b8;margin-top:2px;">
             Multi-source institutional synthesis across 19 sectors · Automated daily generation @ 09:00 AM (Bedrock Qwen 32B, Exa, Tavily, DefiLlama)
@@ -3811,6 +4013,7 @@ function renderMobileTabs() {
 }
 
 function afterRender() {
+  updateFormatButtonStates();
   const scroll = $("#messageScroll");
   if (scroll) {
     const mode = state.workspaceMode || "home";
@@ -4103,13 +4306,24 @@ document.addEventListener("input", (event) => {
   if (action === "composer-draft") {
     state.composerDrafts[state.activeChannelId] = event.target.value;
     queueTyping(Boolean(event.target.value.trim()));
+    const cursor = event.target.selectionStart ?? event.target.value.length;
+    const mention = mentionQueryAt(event.target.value, cursor);
+    const wasMentionOpen = Boolean(state.mentionSuggest);
+    const wasEmojiOpen = state.emojiPickerOpen;
+    state.emojiPickerOpen = false;
+    // Only re-render while an "@" token is actively being typed (open, updated, or just
+    // closed), or to dismiss the emoji picker once typing resumes — plain typing otherwise
+    // stays render-free, same as before this feature existed.
+    if (mention) {
+      state.mentionSuggest = { start: mention.start, query: mention.query, activeIndex: 0 };
+      render();
+    } else if (wasMentionOpen || wasEmojiOpen) {
+      state.mentionSuggest = null;
+      render();
+    }
+    updateFormatButtonStates();
   }
   if (action === "edit-draft") state.editDraft = event.target.value;
-  if (action === "filter-sidebar") {
-    state.sidebarFilter = event.target.value;
-    pendingFocus = { action, cursor: event.target.selectionStart ?? event.target.value.length };
-    render();
-  }
   if (action === "global-search") {
     state.searchQuery = event.target.value;
     pendingFocus = { action, cursor: event.target.selectionStart ?? event.target.value.length };
@@ -4214,7 +4428,6 @@ document.addEventListener("click", async (event) => {
       }
       state.workspaceMode = nextView;
       state.ui.detailsOpen = false;
-      state.sidebarFilter = "";
       render();
     }
     if (action === "refresh-x-mentions") {
@@ -4580,14 +4793,67 @@ document.addEventListener("click", async (event) => {
     if (action === "format-composer") {
       const input = document.querySelector('[data-action="composer-draft"]');
       if (input && !input.disabled) {
-        const start = input.selectionStart;
-        const end = input.selectionEnd;
-        const selected = input.value.slice(start, end);
-        const marker = { bold: "**", italic: "*", code: String.fromCharCode(96) }[button.dataset.format];
-        const inserted = marker ? marker + (selected || "text") + marker : "🙂";
-        input.setRangeText(inserted, start, end, "end");
+        // No manual selection: act on the whole message you've already typed — write the
+        // message first, then click Bold/Italic/Code to send the whole thing that way, without
+        // having to select anything by hand. An explicit selection is still respected as-is,
+        // for formatting just part of a longer message.
+        const { start, end } = currentFormatRange(input);
+        const marker = FORMAT_MARKERS[button.dataset.format];
+        const existing = formatMarkerRange(input.value, start, end, marker);
+        if (existing) {
+          // Already formatted this way — click again to remove it, rather than stacking a
+          // second layer of markers around it.
+          input.setRangeText(existing.inner, existing.start, existing.end, "end");
+        } else {
+          const selected = input.value.slice(start, end);
+          if (selected) {
+            input.setRangeText(marker + selected + marker, start, end, "end");
+          } else {
+            // Nothing to wrap (empty composer, or the cursor sits in whitespace) — place the
+            // cursor between the markers so typing continues right into the formatted text.
+            input.setRangeText(marker + marker, start, end, "start");
+            input.setSelectionRange(start + marker.length, start + marker.length);
+          }
+        }
         state.composerDrafts[state.activeChannelId] = input.value;
         input.focus();
+        updateFormatButtonStates();
+      }
+    }
+    if (action === "select-mention") {
+      applyMentionSuggestion(button.dataset.mentionToken);
+    }
+    if (action === "toggle-emoji-picker") {
+      // Clicking this button (rather than typing in the textarea) is what moves focus off the
+      // composer, so render()'s usual focus/cursor-preserving path never engages here — it only
+      // fires for the element that's actually focused when render() runs, which would be this
+      // button, not the textarea. Capture the cursor explicitly before the DOM is rebuilt, and
+      // put it back on the fresh textarea afterward, or a later emoji click would insert at
+      // position 0 instead of where the user was actually typing.
+      const textarea = document.querySelector('[data-action="composer-draft"]');
+      const savedSelection = textarea ? { start: textarea.selectionStart, end: textarea.selectionEnd } : null;
+      state.emojiPickerOpen = !state.emojiPickerOpen;
+      if (state.emojiPickerOpen) state.mentionSuggest = null;
+      render();
+      const nextTextarea = document.querySelector('[data-action="composer-draft"]');
+      if (nextTextarea) {
+        if (savedSelection) nextTextarea.setSelectionRange(savedSelection.start, savedSelection.end);
+        nextTextarea.focus();
+      }
+    }
+    if (action === "insert-emoji") {
+      const input = document.querySelector('[data-action="composer-draft"]');
+      const emoji = button.dataset.emoji;
+      if (input && !input.disabled && emoji) {
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? input.value.length;
+        input.setRangeText(emoji, start, end, "end");
+        state.composerDrafts[state.activeChannelId] = input.value;
+        state.emojiPickerOpen = false;
+        // Re-render to remove the now-stale picker from the DOM; restoreFocusState() restores
+        // this exact value/cursor since the textarea is still focused when render() runs.
+        input.focus();
+        render();
       }
     }
     if (action === "toggle-urgent") {
@@ -4939,6 +5205,8 @@ async function logout() {
 function selectChannel(channelId) {
   if (state.workspaceMode !== "dms") state.workspaceMode = "home";
   state.activeChannelId = channelId;
+  state.mentionSuggest = null;
+  state.emojiPickerOpen = false;
   const channel = data.channels.find((item) => item.id === channelId);
   if (channel) {
     channel.unread = 0;
@@ -4998,6 +5266,8 @@ async function createMessage(body, attachments = [], parentId = null, channelId 
   state.composerUrgent = false;
   if (channelId && !parentId) {
     state.composerDrafts[channelId] = "";
+    state.mentionSuggest = null;
+    state.emojiPickerOpen = false;
     const textarea = document.querySelector('[data-action="composer-draft"]');
     if (textarea) textarea.value = "";
   }
@@ -5092,7 +5362,7 @@ function queueUploads(files) {
 
 async function stageUpload(item) {
   try {
-    item.progress = 30;
+    item.progress = 1;
     render();
 
     const formData = new FormData();
@@ -5104,12 +5374,23 @@ async function stageUpload(item) {
     formData.append("attachOnly", "1");
     formData.append("file", item.file, item.name);
 
-    item.progress = 65;
-    render();
-
-    const payload = await apiForm("/api/files/upload", formData);
+    // The transfer itself is the vast majority of real elapsed time for a large file, so it gets
+    // most of the bar (1-95%); the rest is reserved for the server writing the file and running
+    // the scan, which aren't reflected by upload progress. Re-renders are throttled — this app
+    // fully rebuilds the page's HTML on every render(), and xhr.upload.onprogress can fire many
+    // times a second, so rendering on every event would make large uploads visibly janky.
+    let lastRenderedAt = 0;
+    const payload = await apiFormWithProgress("/api/files/upload", formData, (sent, total) => {
+      const now = Date.now();
+      const nextProgress = total ? Math.min(95, Math.max(1, Math.round((sent / total) * 95))) : item.progress;
+      if (nextProgress === item.progress) return;
+      item.progress = nextProgress;
+      if (now - lastRenderedAt < 150 && nextProgress < 95) return;
+      lastRenderedAt = now;
+      render();
+    });
     item.id = payload.fileId;
-    item.progress = 90;
+    item.progress = 97;
     item.status = "scan pending";
     render();
 
@@ -5455,6 +5736,13 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+// Keeps the Bold/Italic/Code buttons lit up while dragging/clicking to select text or moving
+// the cursor with arrow keys — not just right after clicking a format button. Cheap (a few
+// string slices) so it's fine to run on every selection change; it never touches render().
+document.addEventListener("selectionchange", () => {
+  if (document.activeElement?.dataset?.action === "composer-draft") updateFormatButtonStates();
+});
+
 document.addEventListener("keydown", event => {
   if (!currentUser()) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -5463,6 +5751,35 @@ document.addEventListener("keydown", event => {
     state.ui.detailsOpen = true;
     render();
     document.querySelector('[data-action="global-search"]')?.focus();
+  }
+  if (state.mentionSuggest && event.target.matches('[data-action="composer-draft"]')) {
+    const candidates = mentionCandidates(state.mentionSuggest.query);
+    if (candidates.length) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        state.mentionSuggest.activeIndex = ((state.mentionSuggest.activeIndex || 0) + 1) % candidates.length;
+        render();
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        state.mentionSuggest.activeIndex = ((state.mentionSuggest.activeIndex || 0) - 1 + candidates.length) % candidates.length;
+        render();
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        applyMentionSuggestion(candidates[Math.min(state.mentionSuggest.activeIndex || 0, candidates.length - 1)].token);
+        return;
+      }
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMentionSuggest();
+      render();
+      return;
+    }
   }
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.target.matches('[data-action="composer-draft"]')) {
     event.preventDefault();
@@ -5477,6 +5794,12 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape") {
     if (state.previewFileId) {
       closeAttachmentPreview();
+      return;
+    }
+    if (state.emojiPickerOpen) {
+      state.emojiPickerOpen = false;
+      render();
+      document.querySelector('[data-action="composer-draft"]')?.focus();
       return;
     }
     if (state.showAddUserModal) {

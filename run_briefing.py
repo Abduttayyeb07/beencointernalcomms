@@ -56,7 +56,7 @@ def save_historical_archive(briefing_data: dict) -> str:
 def run_pipeline(dry_run: bool = False) -> dict:
     """Run the complete end-to-end intelligence pipeline."""
     logger.info("=================================================================")
-    logger.info("🚀 ABDUTTAYYEB BLOCKCHAIN INTELLIGENCE PIPELINE INITIATING")
+    logger.info("🚀 ABDULLAH BLOCKCHAIN INTELLIGENCE PIPELINE INITIATING")
     logger.info("=================================================================")
 
     # Step 1: Ingest Multi-Source Intelligence

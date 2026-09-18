@@ -4673,8 +4673,10 @@ class PortalHandler(SimpleHTTPRequestHandler):
         if not new_body:
             self.write_error(400, "Edited message cannot be empty.")
             return
-        if row["author_id"] != user["id"] and user["role"] not in INTRANET_ADMIN_ROLES:
-            self.write_error(403, "Cannot edit this message.")
+        # Only the author can edit their own message — no role override, matching the same
+        # author-only rule as delete_message.
+        if row["author_id"] != user["id"]:
+            self.write_error(403, "Only the message's author can edit it.")
             return
         history = json_loads(row["edit_history"], [])
         edited_at = utc_now()
@@ -4689,8 +4691,11 @@ class PortalHandler(SimpleHTTPRequestHandler):
         if not row:
             self.write_error(404, "Message not found.")
             return
-        if row["author_id"] != user["id"] and user["role"] not in INTRANET_ADMIN_ROLES:
-            self.write_error(403, "Cannot delete this message.")
+        # Only the author can delete their own message — no role, including super_admin, may
+        # delete someone else's. (Admins can still edit_message to redact content, and channel
+        # deletion/retention policy still apply for bulk moderation.)
+        if row["author_id"] != user["id"]:
+            self.write_error(403, "Only the message's author can delete it.")
             return
         conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (utc_now(), message_id))
         write_audit(conn, user["id"], "message.deleted", "message", message_id, {}, self.client_ip(), self.headers.get("User-Agent", ""))

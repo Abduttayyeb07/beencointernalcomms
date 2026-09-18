@@ -118,7 +118,7 @@ if __name__ == "__main__":
         "meta": {
             "date": "2026-09-16",
             "timestamp": "2026-09-16T10:00:00Z",
-            "curator": "Abduttayyeb Crypto Intelligence Terminal",
+            "curator": "Crypto Intelligence Terminal",
             "executiveSummary": "Test briefing updater injection verified.",
             "keyMetrics": {
                 "topGrowingChain": "Sonic (+18.4% 7d)",
