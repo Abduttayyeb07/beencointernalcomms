@@ -3186,8 +3186,8 @@ function renderAttachmentPreviewModal() {
   }
 
   return `
-    <div class="attachment-preview-backdrop is-open" id="attachmentPreviewBackdrop" data-action="close-attachment-preview">
-      <div class="attachment-preview-dialog" onclick="event.stopPropagation()">
+    <div class="attachment-preview-backdrop is-open" id="attachmentPreviewBackdrop">
+      <div class="attachment-preview-dialog">
         <div class="attachment-preview-header">
           <div class="attachment-preview-title">
             <span class="file-badge">${esc(ext || "file")}</span>
@@ -3195,10 +3195,10 @@ function renderAttachmentPreviewModal() {
             <span class="attachment-preview-meta">(${formatBytes(file.sizeBytes || 0)})</span>
           </div>
           <div class="attachment-preview-actions">
-            <button class="ghost-btn small-btn" data-action="download-file" data-file-id="${esc(file.id)}" title="Download file">
+            <button type="button" class="ghost-btn small-btn" data-action="download-file" data-file-id="${esc(file.id)}" title="Download file">
               Download
             </button>
-            <button class="icon-btn" data-action="close-attachment-preview" aria-label="Close preview" title="Close (Esc)">
+            <button type="button" class="icon-btn" data-action="close-attachment-preview" aria-label="Close preview" title="Close (Esc)">
               ✕
             </button>
           </div>
