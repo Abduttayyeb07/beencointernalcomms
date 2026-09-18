@@ -2922,25 +2922,33 @@ button { cursor: pointer; }
 .sidebar-scroll { padding: 0 8px 16px; }
 .quick-search { margin: 0 0 12px; }
 .quick-search input { height: 28px; min-height: 28px; padding: 0 8px; background: #170f1a; border-color: #4e3c53; border-radius: 6px; font-size: 13px; }
-.sidebar-shortcuts { display: grid; padding-bottom: 14px; border-bottom: 1px solid #ffffff20; margin: 0 4px 16px; }
-.sidebar-shortcuts button,.sidebar-add { display: flex; gap: 10px; align-items: center; padding: 7px 5px; background: none; border: 0; color: #bca9c1; text-align: left; font-size: 14px; font-weight: 600; }
+.sidebar-shortcuts { display: grid; gap: 1px; padding-bottom: 10px; border-bottom: 1px solid #ffffff20; margin: 0 0 10px; }
+.sidebar-shortcuts button,.sidebar-add { display: flex; gap: 10px; align-items: center; min-height: 28px; width: 100%; padding: 0 10px; border-radius: 6px; background: none; border: 0; color: #bca9c1; text-align: left; font-size: 15px; font-weight: 400; line-height: 1.2; }
+.sidebar-shortcuts .chat-icon,.sidebar-add .chat-icon { width: 16px; height: 16px; flex-shrink: 0; }
 .sidebar-shortcuts button:hover,.sidebar-add:hover { color: #fff; background: #ffffff0b; }
-.sidebar-section { margin-top: 15px; }
-.section-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 7px; margin: 0 0 6px; color: #bca9c1; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.sidebar-section { margin: 10px 0 0; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; min-height: 28px; padding: 0 4px 0 6px; margin: 0 0 2px; color: #bca9c1; font-size: 15px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 /* Now a real button (it toggles the section), sitting inside the same .section-heading as the
-   "+" button — which sets font-size:20px for itself, so this needs to explicitly reset it back
-   rather than inherit that. */
-.section-heading-label { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 14px; padding: 2px; }
+   "+" button. Both are buttons, so each gets a selector at least as specific as
+   `.section-heading button` — otherwise the "+" size leaks onto the label. */
+.section-heading .section-heading-label { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 4px; border-radius: 6px; font-size: 15px; font-weight: 400; }
 .section-heading-label:hover { color: #fff; }
 .workspace-chevron.is-collapsed { transform: rotate(-90deg); }
 .workspace-chevron { transition: transform 0.15s ease; }
-.section-heading button { border: 0; background: none; color: inherit; font-size: 20px; }
+.section-heading button { border: 0; background: none; color: inherit; }
+.section-heading > button:not(.section-heading-label) { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; font-size: 18px; line-height: 1; opacity: 0.75; }
+.section-heading > button:not(.section-heading-label):hover { opacity: 1; background: #ffffff14; color: #fff; }
 .nav-list { gap: 1px; }
-.nav-item { min-height: 28px; padding: 3px 10px 3px 22px; border: 0; border-radius: 5px; color: #bcadbf; font-size: 14px; font-weight: 600; gap: 8px; }
+.nav-item { grid-template-columns: 20px minmax(0, 1fr) auto; min-height: 28px; padding: 0 10px 0 12px; border: 0; border-radius: 6px; color: #bcadbf; font-size: 15px; font-weight: 400; gap: 8px; }
 .nav-item:hover { background: #ffffff0a; }
 .nav-item.is-active { background: #7d3989; color: white; }
-.nav-item .chat-icon { width: 14px; height: 14px; }
+.nav-item.has-unread { color: #fff; font-weight: 700; }
+.nav-item > span:first-child { display: grid; place-items: center; }
+.nav-item .chat-icon { width: 15px; height: 15px; }
+.nav-item .channel-hash { color: inherit; font-size: 17px; font-weight: 400; line-height: 1; opacity: 0.85; }
+.nav-item .avatar.tiny { width: 20px; height: 20px; min-width: 20px; min-height: 20px; border-radius: 5px; font-size: 9px; }
 .nav-item .mini-meta { display: none; }
+.sidebar-add { margin-top: 2px; padding-left: 12px; }
 .avatar { border-radius: 7px; background: #ddcce3; color: #501851; font-weight: 750; flex-shrink: 0; aspect-ratio: 1 / 1; min-width: 38px; min-height: 38px; }
 .avatar.small { width: 36px; height: 36px; min-width: 36px; min-height: 36px; font-size: 13px; }
 .avatar.tiny { width: 20px; height: 20px; min-width: 20px; min-height: 20px; font-size: 9px; }

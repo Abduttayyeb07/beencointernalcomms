@@ -1586,13 +1586,14 @@ function renderThreadsView() {
 function renderChannelButton(channel) {
   const isCurrentlyActive = channel.id === state.activeChannelId;
   const active = isCurrentlyActive ? "is-active" : "";
-  const prefix = channel.type === "private" ? chatIcon("lock") : channel.type === "dm" ? '<span class="avatar tiny">' + initials(channelName(channel).replace("@", "")) + '</span>' : "";
+  const prefix = channel.type === "private" ? chatIcon("lock") : channel.type === "dm" ? '<span class="avatar tiny">' + initials(channelName(channel).replace("@", "")) + '</span>' : '<span class="channel-hash" aria-hidden="true">#</span>';
+  const hasUnread = !isCurrentlyActive && (channel.unread || channel.mentions);
   const owned = channel.type === "private" && (channel.ownerIds || []).includes(currentUser()?.id);
   const showMentions = !isCurrentlyActive && channel.mentions;
   const showUnread = !isCurrentlyActive && channel.unread;
   const badge = showMentions ? `<span class="badge warn">${channel.mentions}</span>` : showUnread ? `<span class="badge">${channel.unread}</span>` : channel.onlineMemberCount ? `<span class="mini-meta">${channel.onlineMemberCount} on</span>` : "";
   return `
-    <button class="nav-item ${active}" data-action="select-channel" data-channel-id="${channel.id}">
+    <button class="nav-item ${active} ${hasUnread ? "has-unread" : ""}" data-action="select-channel" data-channel-id="${channel.id}">
       <span>${prefix}</span>
       <span class="nav-label">${esc(channel.type === "dm" ? channelName(channel).replace("@", "") : channel.name)}</span>
       ${owned ? `<span class="mini-meta">owner</span>` : ""}
