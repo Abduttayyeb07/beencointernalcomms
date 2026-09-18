@@ -42,8 +42,10 @@ const state = {
   detailsScrollTop: 0,
   ui: { sidebarOpen: false, sidebarCollapsed: false, detailsOpen: false, toasts: [], collapsedNavSections: {} },
   previewFileId: null,
+  previewFile: null,
   previewFileContent: null,
-  previewFileLoading: false
+  previewFileLoading: false,
+  pendingAttachments: []
 };
 
 let data = emptyData();
@@ -454,7 +456,17 @@ function userById(id) {
 }
 
 function fileById(id) {
-  return data.files.find((file) => file.id === id);
+  if (!id) return null;
+  const found = (data.files || []).find((file) => file.id === id);
+  if (found) return found;
+  if (state.previewFile && state.previewFile.id === id) return state.previewFile;
+  for (const msg of (data.messages || [])) {
+    if (msg.attachmentFiles && Array.isArray(msg.attachmentFiles)) {
+      const match = msg.attachmentFiles.find((f) => f.id === id);
+      if (match) return match;
+    }
+  }
+  return null;
 }
 
 function activeChannel() {
@@ -1936,15 +1948,15 @@ function renderAttachment(file) {
         <strong data-action="preview-attachment" data-file-id="${esc(file.id)}" title="Click to view file in browser">${esc(file.originalName)}</strong>
         <span>${formatBytes(file.sizeBytes)} · ${esc(file.mime || "File")}</span>
       </div>
-      <div class="file-actions" onclick="event.stopPropagation()">
+      <div class="file-actions">
         ${file.status === "available" ? `
-          <button class="primary-btn small-btn" data-action="preview-attachment" data-file-id="${esc(file.id)}" title="View attachment in browser">View</button>
+          <button type="button" class="primary-btn small-btn" data-action="preview-attachment" data-file-id="${esc(file.id)}" title="View attachment in browser">View</button>
         ` : ""}
-        <button class="ghost-btn small-btn" data-action="download-file" data-file-id="${file.id}" ${file.status !== "available" ? "disabled" : ""}>
+        <button type="button" class="ghost-btn small-btn" data-action="download-file" data-file-id="${file.id}" ${file.status !== "available" ? "disabled" : ""}>
           ${file.status === "available" ? "Download" : esc(file.status)}
         </button>
         ${deletable ? `
-          <button class="danger-btn small-btn" data-action="delete-file" data-file-id="${esc(file.id)}" title="Delete file">Delete</button>
+          <button type="button" class="danger-btn small-btn" data-action="delete-file" data-file-id="${esc(file.id)}" title="Delete file">Delete</button>
         ` : ""}
       </div>
     </div>
@@ -1972,6 +1984,34 @@ function renderMessageActions(message, replyCount) {
   `;
 }
 
+function renderPendingAttachments() {
+  const channelId = state.activeChannelId;
+  const pending = (state.pendingAttachments || []).filter((a) => a.channelId === channelId);
+  if (!pending.length) return "";
+  return `
+    <div class="composer-pending-attachments">
+      ${pending.map((item) => {
+        const ext = item.name && item.name.includes(".") ? item.name.split(".").pop().slice(0, 4).toUpperCase() : "FIL";
+        const isReady = item.status === "available";
+        const isFailed = item.status === "failed";
+        const isScanning = item.status === "scan pending";
+        const statusLabel = isReady ? "✓ Ready" : (isFailed ? "Failed" : (isScanning ? "Scanning..." : `Loading ${item.progress}%`));
+        const statusClass = isReady ? "ready" : (isFailed ? "failed" : "loading");
+        return `
+          <div class="pending-attachment-chip is-${statusClass}">
+            <span class="pending-chip-icon">${esc(ext)}</span>
+            <div class="pending-chip-info">
+              <span class="pending-chip-name" title="${esc(item.name)}">${esc(item.name)}</span>
+              <span class="pending-chip-meta">${formatBytes(item.size)} · <strong class="chip-status-${statusClass}">${statusLabel}</strong></span>
+            </div>
+            <button type="button" class="pending-chip-remove" data-action="remove-pending-attachment" data-temp-id="${esc(item.tempId)}" title="Remove attachment" aria-label="Remove attachment">✕</button>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 function renderComposer() {
   const channel = activeChannel();
   if (channel.id && isViewOnlyDm(channel)) {
@@ -1985,6 +2025,7 @@ function renderComposer() {
   return `
     <footer class="composer">
       <div class="composer-box ${state.composerUrgent ? "is-urgent-composer" : ""}">
+        ${renderPendingAttachments()}
         <textarea data-action="composer-draft" placeholder="${disabled ? "Channel is locked" : esc(state.composerUrgent ? `⚠️ IMPORTANT message to ${channelName(channel)} (will ping Super Admin)` : `Message ${channelName(channel)}`)}" ${disabled ? "disabled" : ""}>${esc(draft)}</textarea>
         <div class="composer-actions">
           <button class="icon-btn" data-action="attach-file" title="Attach files" aria-label="Attach files" ${disabled ? "disabled" : ""}>+</button>
@@ -3099,10 +3140,10 @@ function renderAddUserModal() {
 
 function renderAttachmentPreviewModal() {
   if (!state.previewFileId) return "";
-  const file = fileById(state.previewFileId);
+  const file = state.previewFile || fileById(state.previewFileId);
   if (!file) return "";
 
-  const ext = file.originalName.includes(".") ? file.originalName.split(".").pop().toLowerCase() : "";
+  const ext = file.originalName && file.originalName.includes(".") ? file.originalName.split(".").pop().toLowerCase() : "";
   const mime = String(file.mime || "").toLowerCase();
   const isImage = mime.startsWith("image/") || ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext);
   const isPdf = mime === "application/pdf" || ext === "pdf";
@@ -3129,7 +3170,7 @@ function renderAttachmentPreviewModal() {
         <div class="preview-doc-icon">${esc(ext.toUpperCase() || "DOC")}</div>
         <div>
           <h4 style="margin:0 0 6px 0;font-size:16px;">${esc(file.originalName)}</h4>
-          <p class="muted" style="margin:0;">${formatBytes(file.sizeBytes)} · ${esc(file.mime || "Document")}</p>
+          <p class="muted" style="margin:0;">${formatBytes(file.sizeBytes || 0)} · ${esc(file.mime || "Document")}</p>
         </div>
         ${file.extractedText && file.extractedText !== file.originalName ? `
           <div class="preview-doc-extracted">
@@ -3151,7 +3192,7 @@ function renderAttachmentPreviewModal() {
           <div class="attachment-preview-title">
             <span class="file-badge">${esc(ext || "file")}</span>
             <h3 title="${esc(file.originalName)}">${esc(file.originalName)}</h3>
-            <span class="attachment-preview-meta">(${formatBytes(file.sizeBytes)})</span>
+            <span class="attachment-preview-meta">(${formatBytes(file.sizeBytes || 0)})</span>
           </div>
           <div class="attachment-preview-actions">
             <button class="ghost-btn small-btn" data-action="download-file" data-file-id="${esc(file.id)}" title="Download file">
@@ -3171,11 +3212,29 @@ function renderAttachmentPreviewModal() {
 }
 
 async function openAttachmentPreview(fileId) {
-  const file = fileById(fileId);
-  if (!file) return;
+  if (!fileId) return;
+  let file = fileById(fileId);
+  if (!file) {
+    state.previewFileId = fileId;
+    state.previewFileLoading = true;
+    render();
+    try {
+      const res = await api(`/api/files/${fileId}`);
+      if (res && res.file) {
+        file = res.file;
+        if (!data.files.some(f => f.id === file.id)) {
+          data.files.unshift(file);
+        }
+      }
+    } catch {}
+  }
+  if (!file) {
+    file = { id: fileId, originalName: "Attachment", mime: "application/pdf", sizeBytes: 0, status: "available" };
+  }
   state.previewFileId = fileId;
+  state.previewFile = file;
   state.previewFileContent = null;
-  const ext = file.originalName.includes(".") ? file.originalName.split(".").pop().toLowerCase() : "";
+  const ext = file.originalName && file.originalName.includes(".") ? file.originalName.split(".").pop().toLowerCase() : "";
   const mime = String(file.mime || "").toLowerCase();
   const isTextOrCode = mime.startsWith("text/") || ["txt", "md", "json", "csv", "js", "ts", "py", "html", "css", "xml", "yaml", "yml", "sql", "log"].includes(ext) || mime === "application/json";
 
@@ -3202,6 +3261,7 @@ async function openAttachmentPreview(fileId) {
 
 function closeAttachmentPreview() {
   state.previewFileId = null;
+  state.previewFile = null;
   state.previewFileContent = null;
   state.previewFileLoading = false;
   render();
@@ -4564,11 +4624,28 @@ document.addEventListener("click", async (event) => {
     if (action === "send-message") {
       const textarea = document.querySelector('[data-action="composer-draft"]');
       const draft = (textarea ? textarea.value : (state.composerDrafts[state.activeChannelId] || "")).trim();
-      if (draft) {
-        state.composerDrafts[state.activeChannelId] = "";
+      const channelId = state.activeChannelId;
+      const pending = (state.pendingAttachments || []).filter((a) => a.channelId === channelId);
+
+      const hasUploading = pending.some((a) => a.status === "uploading" || a.status === "scan pending");
+      if (hasUploading) {
+        toast("Attachment loading", "Please wait for your attachment to finish loading.");
+        return;
+      }
+
+      const readyAttachments = pending.filter((a) => a.status === "available" && a.id);
+
+      if (draft || readyAttachments.length > 0) {
+        const attachmentIds = readyAttachments.map((a) => a.id);
+        const bodyText = draft || (readyAttachments.length === 1 ? `Shared file **${readyAttachments[0].name}**` : `Shared ${readyAttachments.length} attachments`);
+
+        state.pendingAttachments = (state.pendingAttachments || []).filter((a) => a.channelId !== channelId);
+        state.composerDrafts[channelId] = "";
         if (textarea) textarea.value = "";
-        await createMessage(draft);
-        state.composerDrafts[state.activeChannelId] = "";
+
+        await createMessage(bodyText, attachmentIds);
+
+        state.composerDrafts[channelId] = "";
         const afterTextarea = document.querySelector('[data-action="composer-draft"]');
         if (afterTextarea) afterTextarea.value = "";
         render();
@@ -4644,6 +4721,15 @@ document.addEventListener("click", async (event) => {
       toast("Leave updated", button.dataset.status);
     }
     if (action === "attach-file") $("#fileInput")?.click();
+    if (action === "remove-pending-attachment") {
+      const tempId = button.dataset.tempId;
+      const item = (state.pendingAttachments || []).find((a) => a.tempId === tempId);
+      if (item?.id) {
+        api(`/api/files/${item.id}`, { method: "DELETE" }).catch(() => {});
+      }
+      state.pendingAttachments = (state.pendingAttachments || []).filter((a) => a.tempId !== tempId);
+      render();
+    }
     if (action === "pause-upload") pauseUpload(button.dataset.uploadId);
     if (action === "resume-upload") resumeUpload(button.dataset.uploadId);
     if (action === "download-file") await downloadFile(button.dataset.fileId);
@@ -4976,78 +5062,64 @@ function queueUploads(files) {
     return;
   }
 
-  // Autosend: Capture current composer draft and clear composer immediately
-  const textarea = document.querySelector('[data-action="composer-draft"]');
-  const draft = (textarea ? textarea.value : (state.composerDrafts[state.activeChannelId] || "")).trim();
+  if (!state.pendingAttachments) {
+    state.pendingAttachments = [];
+  }
   const channelId = state.activeChannelId;
 
-  state.composerDrafts[channelId] = "";
-  state.composerUrgent = false;
-  if (textarea) textarea.value = "";
-
-  files.forEach((file, index) => {
+  files.forEach((file) => {
     const allowed = isUploadAllowed(file);
     if (!allowed.ok) {
       toast("Upload rejected", allowed.message);
       return;
     }
-    const upload = {
-      id: uid("upload"),
+    const pendingItem = {
+      id: null,
+      tempId: uid("patt"),
       channelId,
       file,
       name: file.name,
       size: file.size,
-      progress: 0,
-      paused: false,
-      status: "uploading",
-      messageBody: index === 0 ? draft : ""
+      mime: file.type || "application/octet-stream",
+      progress: 15,
+      status: "uploading"
     };
-    state.uploads.push(upload);
-    startUpload(upload.id);
+    state.pendingAttachments.push(pendingItem);
+    stageUpload(pendingItem);
   });
   render();
 }
 
-async function startUpload(uploadId) {
-  const upload = state.uploads.find((item) => item.id === uploadId);
-  if (!upload) return;
-
+async function stageUpload(item) {
   try {
-    upload.status = "uploading";
-    upload.progress = 25;
+    item.progress = 30;
     render();
 
     const formData = new FormData();
-    formData.append("channelId", upload.channelId);
-    formData.append("originalName", upload.name);
-    formData.append("mime", upload.file.type || "application/octet-stream");
-    formData.append("sizeBytes", String(upload.size));
-    formData.append("extractedText", upload.name);
-    if (upload.messageBody) {
-      formData.append("messageBody", upload.messageBody);
-    }
-    formData.append("file", upload.file, upload.name);
+    formData.append("channelId", item.channelId);
+    formData.append("originalName", item.name);
+    formData.append("mime", item.mime);
+    formData.append("sizeBytes", String(item.size));
+    formData.append("extractedText", item.name);
+    formData.append("attachOnly", "1");
+    formData.append("file", item.file, item.name);
 
-    upload.progress = 65;
+    item.progress = 65;
     render();
 
     const payload = await apiForm("/api/files/upload", formData);
-    upload.progress = 90;
-    upload.status = "scan pending";
+    item.id = payload.fileId;
+    item.progress = 90;
+    item.status = "scan pending";
     render();
 
-    await api(`/api/files/${payload.fileId}/scan`, { method: "POST" });
-    upload.progress = 100;
-    state.uploads = state.uploads.filter((item) => item.id !== upload.id);
-
-    if (upload.channelId === state.activeChannelId) {
-      state.messageScroll.nearBottom = true;
-    }
-    await refresh({ preserveMessages: false, pinToBottom: upload.channelId === state.activeChannelId });
-    playNotificationChime();
-    toast("✓ Attachment Sent", upload.name);
+    const scan = await api(`/api/files/${payload.fileId}/scan`, { method: "POST" });
+    item.progress = 100;
+    item.status = scan.status || "available";
+    render();
   } catch (error) {
-    upload.status = "failed";
+    item.status = "failed";
+    item.error = error.message;
     toast("Upload failed", error.message);
     render();
   }

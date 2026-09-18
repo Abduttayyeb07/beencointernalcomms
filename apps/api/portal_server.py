@@ -3469,6 +3469,10 @@ class PortalHandler(SimpleHTTPRequestHandler):
             self.preview_file(conn, user, path.split("/")[3])
             return
 
+        if path.startswith("/api/files/") and len(path.split("/")) == 4 and method == "GET":
+            self.get_file_info(conn, user, path.split("/")[3])
+            return
+
         if path.startswith("/api/files/") and len(path.split("/")) == 4 and method == "DELETE":
             self.delete_file(conn, user, path.split("/")[3])
             return
@@ -4602,6 +4606,8 @@ class PortalHandler(SimpleHTTPRequestHandler):
                 write_audit(conn, user["id"], "tag.alert", "message", message_id, {"tags": hashtags, "channelId": channel_id, "isOro": is_oro}, self.client_ip(), self.headers.get("User-Agent", ""))
             write_audit(conn, user["id"], "message.created", "message", message_id, {"channelId": channel_id, "parentId": parent_id, "isUrgent": is_urgent}, self.client_ip(), self.headers.get("User-Agent", ""))
         LIVE_BROKER.broadcast("message:created", {"channelId": channel_id, "messageId": message_id, "authorId": user["id"], "isUrgent": is_urgent})
+        for fid in attachments:
+            LIVE_BROKER.broadcast("file:uploaded", {"channelId": channel_id, "fileId": fid, "messageId": message_id})
         self.write_json(201, {"ok": True, "messageId": message_id})
 
     def acknowledge_message(self, conn: PostgresConnection, user: dict, message_id: str) -> None:
@@ -4727,6 +4733,8 @@ class PortalHandler(SimpleHTTPRequestHandler):
         version = conn.execute("SELECT COUNT(*) + 1 AS version FROM files WHERE channel_id = ? AND original_name = ?", (channel_id, original_name)).fetchone()["version"]
         checksum = hashlib.sha256(content).hexdigest()
         storage_key = f"{channel_id}/{file_id}/{original_name}"
+        attach_only = str(fields.get("attachOnly", "")).lower() in ("1", "true") or str(fields.get("createMessage", "")).lower() in ("0", "false")
+
         # The bytes are already safely on disk by this point (worst case on a crash: an orphan
         # file nothing points to). The file/message/attachment rows below must land together,
         # or the UI would show a message with a broken attachment link.
@@ -4753,13 +4761,19 @@ class PortalHandler(SimpleHTTPRequestHandler):
                     utc_now(),
                 ),
             )
-            message_id = uid("msg")
-            body_text = body.get("messageBody") or f"Shared file **{original_name}**"
-            conn.execute("INSERT INTO messages (id, channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)", (message_id, channel_id, user["id"], body_text, utc_now()))
-            conn.execute("INSERT INTO message_attachments (message_id, file_id) VALUES (?, ?)", (message_id, file_id))
-            write_audit(conn, user["id"], "file.upload.completed", "file", file_id, {"protocol": "multipart", "storage": "local", "messageId": message_id, "checksum": checksum}, self.client_ip(), self.headers.get("User-Agent", ""))
-        LIVE_BROKER.broadcast("file:uploaded", {"channelId": channel_id, "fileId": file_id, "messageId": message_id})
-        self.write_json(201, {"ok": True, "fileId": file_id, "messageId": message_id})
+            if not attach_only:
+                message_id = uid("msg")
+                body_text = body.get("messageBody") or f"Shared file **{original_name}**"
+                conn.execute("INSERT INTO messages (id, channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)", (message_id, channel_id, user["id"], body_text, utc_now()))
+                conn.execute("INSERT INTO message_attachments (message_id, file_id) VALUES (?, ?)", (message_id, file_id))
+                write_audit(conn, user["id"], "file.upload.completed", "file", file_id, {"protocol": "multipart", "storage": "local", "messageId": message_id, "checksum": checksum}, self.client_ip(), self.headers.get("User-Agent", ""))
+            else:
+                message_id = None
+                write_audit(conn, user["id"], "file.upload.staged", "file", file_id, {"protocol": "multipart", "storage": "local", "checksum": checksum}, self.client_ip(), self.headers.get("User-Agent", ""))
+
+        if not attach_only:
+            LIVE_BROKER.broadcast("file:uploaded", {"channelId": channel_id, "fileId": file_id, "messageId": message_id})
+        self.write_json(201, {"ok": True, "fileId": file_id, "messageId": message_id, "staged": attach_only})
 
     def create_file(self, conn: PostgresConnection, user: dict) -> None:
         body = self.read_json()
@@ -4840,6 +4854,16 @@ class PortalHandler(SimpleHTTPRequestHandler):
             write_audit(conn, user["id"], "file.upload.completed", "file", file_id, {"protocol": "local", "storage": "local", "messageId": message_id}, self.client_ip(), self.headers.get("User-Agent", ""))
         LIVE_BROKER.broadcast("file:uploaded", {"channelId": channel_id, "fileId": file_id, "messageId": message_id})
         self.write_json(201, {"ok": True, "fileId": file_id, "messageId": message_id})
+
+    def get_file_info(self, conn: PostgresConnection, user: dict, file_id: str) -> None:
+        row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+        if not row:
+            self.write_error(404, "File not found.")
+            return
+        if not can_access_channel(conn, user, row["channel_id"]):
+            self.write_error(403, "No access to this file.")
+            return
+        self.write_json(200, {"ok": True, "file": serialize_file(row)})
 
     def scan_file(self, conn: PostgresConnection, user: dict, file_id: str) -> None:
         row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()

@@ -1,4 +1,4 @@
-const CACHE_NAME = "beenco-connect-v25";
+const CACHE_NAME = "beenco-connect-v26";
 const APP_SHELL = [
   "./",
   "./index.html",
