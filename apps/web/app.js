@@ -40,7 +40,10 @@ const state = {
   viewScroll: {},
   sidebarScrollTop: 0,
   detailsScrollTop: 0,
-  ui: { sidebarOpen: false, sidebarCollapsed: false, detailsOpen: false, toasts: [], collapsedNavSections: {} }
+  ui: { sidebarOpen: false, sidebarCollapsed: false, detailsOpen: false, toasts: [], collapsedNavSections: {} },
+  previewFileId: null,
+  previewFileContent: null,
+  previewFileLoading: false
 };
 
 let data = emptyData();
@@ -53,6 +56,8 @@ let lastTypingPing = 0;
 let refreshTimer = null;
 let refreshInFlight = false;
 let currentDayKey = localDayKey();
+let liveEventSource = null;
+let liveReconnectTimer = null;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 
@@ -116,6 +121,7 @@ async function init() {
     data.config = session.config || data.config;
     if (session.user) {
       await refresh();
+      initLiveStream();
     } else {
       state.loading = false;
       state.ready = true;
@@ -202,6 +208,9 @@ async function refresh(options = {}) {
 
     const nextBackgroundSignature = backgroundDataSignature(nextData);
     data = nextData;
+    if (currentUser() && !liveEventSource && !liveReconnectTimer) {
+      initLiveStream();
+    }
 
     if (state.activeChannelId) {
       const active = data.channels.find((c) => c.id === state.activeChannelId);
@@ -1515,6 +1524,7 @@ function renderShell() {
       ${renderMobileTabs()}
       ${renderEventModal()}
       ${renderAddUserModal()}
+      ${renderAttachmentPreviewModal()}
       <input class="hidden" id="fileInput" type="file" multiple />
       <div class="toast-region" id="toasts"></div>
     </div>`;
@@ -1916,13 +1926,19 @@ function renderAttachment(file) {
       </div>
     `;
   }
-  const ext = file.originalName.includes(".") ? file.originalName.split(".").pop().slice(0, 3).toUpperCase() : "FIL";
+  const ext = file.originalName.includes(".") ? file.originalName.split(".").pop().slice(0, 4).toUpperCase() : "FIL";
   const isImage = String(file.mime || "").startsWith("image/") && file.previewUrl;
   return `
-    <div class="file-card">
-      ${isImage ? `<button class="image-thumb" data-action="open-external" data-url="${esc(file.previewUrl)}" aria-label="Open image preview"><img src="${esc(file.previewUrl)}" alt="${esc(file.originalName)}" loading="lazy" /></button>` : `<span class="file-icon">${esc(ext)}</span>`}
-      <div class="file-meta"><strong>${esc(file.originalName)}</strong><span>${formatBytes(file.sizeBytes)} · ${esc(file.mime || "File")}</span></div>
-      <div class="file-actions">
+    <div class="file-card file-card-clickable" data-action="preview-attachment" data-file-id="${esc(file.id)}">
+      ${isImage ? `<button class="image-thumb" data-action="preview-attachment" data-file-id="${esc(file.id)}" aria-label="Open image preview"><img src="${esc(file.previewUrl)}" alt="${esc(file.originalName)}" loading="lazy" /></button>` : `<span class="file-icon" data-action="preview-attachment" data-file-id="${esc(file.id)}">${esc(ext)}</span>`}
+      <div class="file-meta">
+        <strong data-action="preview-attachment" data-file-id="${esc(file.id)}" title="Click to view file in browser">${esc(file.originalName)}</strong>
+        <span>${formatBytes(file.sizeBytes)} · ${esc(file.mime || "File")}</span>
+      </div>
+      <div class="file-actions" onclick="event.stopPropagation()">
+        ${file.status === "available" ? `
+          <button class="primary-btn small-btn" data-action="preview-attachment" data-file-id="${esc(file.id)}" title="View attachment in browser">View</button>
+        ` : ""}
         <button class="ghost-btn small-btn" data-action="download-file" data-file-id="${file.id}" ${file.status !== "available" ? "disabled" : ""}>
           ${file.status === "available" ? "Download" : esc(file.status)}
         </button>
@@ -3080,6 +3096,117 @@ function renderAddUserModal() {
   `;
 }
 
+function renderAttachmentPreviewModal() {
+  if (!state.previewFileId) return "";
+  const file = fileById(state.previewFileId);
+  if (!file) return "";
+
+  const ext = file.originalName.includes(".") ? file.originalName.split(".").pop().toLowerCase() : "";
+  const mime = String(file.mime || "").toLowerCase();
+  const isImage = mime.startsWith("image/") || ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext);
+  const isPdf = mime === "application/pdf" || ext === "pdf";
+  const isAudio = mime.startsWith("audio/") || ["mp3", "wav", "ogg", "m4a", "webm"].includes(ext) || file.kind === "voice";
+  const isVideo = mime.startsWith("video/") || ["mp4", "webm", "mov"].includes(ext);
+  const isTextOrCode = mime.startsWith("text/") || ["txt", "md", "json", "csv", "js", "ts", "py", "html", "css", "xml", "yaml", "yml", "sql", "log"].includes(ext) || mime === "application/json";
+
+  let bodyHtml = "";
+  if (state.previewFileLoading) {
+    bodyHtml = `<div class="empty-state">Loading preview...</div>`;
+  } else if (isPdf) {
+    bodyHtml = `<iframe src="/api/files/${esc(file.id)}/preview" class="preview-pdf-frame" title="PDF preview"></iframe>`;
+  } else if (isImage) {
+    bodyHtml = `<div class="preview-img-container"><img src="/api/files/${esc(file.id)}/preview" alt="${esc(file.originalName)}" /></div>`;
+  } else if (isVideo) {
+    bodyHtml = `<div class="preview-video-container"><video controls autoplay src="/api/files/${esc(file.id)}/preview" style="max-width:100%;max-height:75vh;border-radius:6px;"></video></div>`;
+  } else if (isAudio) {
+    bodyHtml = `<div class="preview-audio-container"><audio controls autoplay src="/api/files/${esc(file.id)}/preview" style="width:100%;max-width:500px;"></audio></div>`;
+  } else if (isTextOrCode && state.previewFileContent !== null) {
+    bodyHtml = `<pre class="preview-code-viewport"><code>${esc(state.previewFileContent)}</code></pre>`;
+  } else {
+    bodyHtml = `
+      <div class="preview-doc-card">
+        <div class="preview-doc-icon">${esc(ext.toUpperCase() || "DOC")}</div>
+        <div>
+          <h4 style="margin:0 0 6px 0;font-size:16px;">${esc(file.originalName)}</h4>
+          <p class="muted" style="margin:0;">${formatBytes(file.sizeBytes)} · ${esc(file.mime || "Document")}</p>
+        </div>
+        ${file.extractedText && file.extractedText !== file.originalName ? `
+          <div class="preview-doc-extracted">
+            <strong style="display:block;margin-bottom:4px;color:var(--text);">Document Text Summary:</strong>
+            ${esc(file.extractedText.slice(0, 1200))}
+          </div>
+        ` : ""}
+        <button class="primary-btn" data-action="download-file" data-file-id="${esc(file.id)}" style="margin-top:8px;">
+          Download to View
+        </button>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="attachment-preview-backdrop is-open" id="attachmentPreviewBackdrop" data-action="close-attachment-preview">
+      <div class="attachment-preview-dialog" onclick="event.stopPropagation()">
+        <div class="attachment-preview-header">
+          <div class="attachment-preview-title">
+            <span class="file-badge">${esc(ext || "file")}</span>
+            <h3 title="${esc(file.originalName)}">${esc(file.originalName)}</h3>
+            <span class="attachment-preview-meta">(${formatBytes(file.sizeBytes)})</span>
+          </div>
+          <div class="attachment-preview-actions">
+            <button class="ghost-btn small-btn" data-action="download-file" data-file-id="${esc(file.id)}" title="Download file">
+              Download
+            </button>
+            <button class="icon-btn" data-action="close-attachment-preview" aria-label="Close preview" title="Close (Esc)">
+              ✕
+            </button>
+          </div>
+        </div>
+        <div class="attachment-preview-body">
+          ${bodyHtml}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function openAttachmentPreview(fileId) {
+  const file = fileById(fileId);
+  if (!file) return;
+  state.previewFileId = fileId;
+  state.previewFileContent = null;
+  const ext = file.originalName.includes(".") ? file.originalName.split(".").pop().toLowerCase() : "";
+  const mime = String(file.mime || "").toLowerCase();
+  const isTextOrCode = mime.startsWith("text/") || ["txt", "md", "json", "csv", "js", "ts", "py", "html", "css", "xml", "yaml", "yml", "sql", "log"].includes(ext) || mime === "application/json";
+
+  render();
+
+  if (isTextOrCode) {
+    state.previewFileLoading = true;
+    render();
+    try {
+      const res = await fetch(`/api/files/${fileId}/preview`, { credentials: "same-origin" });
+      if (res.ok) {
+        state.previewFileContent = await res.text();
+      } else {
+        state.previewFileContent = `[Preview could not be loaded: HTTP ${res.status}]`;
+      }
+    } catch (err) {
+      state.previewFileContent = `[Preview error: ${err.message}]`;
+    } finally {
+      state.previewFileLoading = false;
+      render();
+    }
+  }
+}
+
+function closeAttachmentPreview() {
+  state.previewFileId = null;
+  state.previewFileContent = null;
+  state.previewFileLoading = false;
+  render();
+}
+
+
 function renderAiReportsView() {
   if (!isReportAdmin()) {
     return `
@@ -3992,6 +4119,10 @@ document.addEventListener("click", async (event) => {
     render();
     return;
   }
+  if (event.target.id === "attachmentPreviewBackdrop") {
+    closeAttachmentPreview();
+    return;
+  }
   if (event.target.id === "eventModalBackdrop" || (event.target.classList && event.target.classList.contains("modal-backdrop") && !event.target.closest(".modal-dialog"))) {
     state.showEventModal = false;
     state.showAddUserModal = false;
@@ -4515,6 +4646,8 @@ document.addEventListener("click", async (event) => {
     if (action === "pause-upload") pauseUpload(button.dataset.uploadId);
     if (action === "resume-upload") resumeUpload(button.dataset.uploadId);
     if (action === "download-file") await downloadFile(button.dataset.fileId);
+    if (action === "preview-attachment") await openAttachmentPreview(button.dataset.fileId);
+    if (action === "close-attachment-preview") closeAttachmentPreview();
     if (action === "toggle-voice") state.voice.recording ? stopVoiceRecording() : await startVoiceRecording();
     if (action === "task-status") {
       await api(`/api/tasks/${button.dataset.taskId}`, { method: "PATCH", body: { status: button.dataset.status } });
@@ -4692,6 +4825,12 @@ document.addEventListener("click", async (event) => {
 });
 
 async function logout() {
+  if (liveEventSource) {
+    liveEventSource.close();
+    liveEventSource = null;
+  }
+  clearTimeout(liveReconnectTimer);
+  liveReconnectTimer = null;
   try {
     await api("/api/auth/logout", { method: "POST" });
   } catch {
@@ -4830,52 +4969,87 @@ async function updateProfile(payload) {
 }
 
 function queueUploads(files) {
-  files.forEach((file) => {
+  if (!files || !files.length) return;
+  if (!state.activeChannelId) {
+    toast("No channel selected", "Please open a channel before attaching files.");
+    return;
+  }
+
+  // Autosend: Capture current composer draft and clear composer immediately
+  const textarea = document.querySelector('[data-action="composer-draft"]');
+  const draft = (textarea ? textarea.value : (state.composerDrafts[state.activeChannelId] || "")).trim();
+  const channelId = state.activeChannelId;
+
+  state.composerDrafts[channelId] = "";
+  state.composerUrgent = false;
+  if (textarea) textarea.value = "";
+
+  files.forEach((file, index) => {
     const allowed = isUploadAllowed(file);
     if (!allowed.ok) {
       toast("Upload rejected", allowed.message);
       return;
     }
-    const upload = { id: uid("upload"), channelId: state.activeChannelId, file, name: file.name, size: file.size, progress: 0, paused: false, status: "uploading" };
+    const upload = {
+      id: uid("upload"),
+      channelId,
+      file,
+      name: file.name,
+      size: file.size,
+      progress: 0,
+      paused: false,
+      status: "uploading",
+      messageBody: index === 0 ? draft : ""
+    };
     state.uploads.push(upload);
     startUpload(upload.id);
   });
   render();
 }
 
-function startUpload(uploadId) {
-  const interval = setInterval(async () => {
-    const upload = state.uploads.find((item) => item.id === uploadId);
-    if (!upload) {
-      clearInterval(interval);
-      return;
-    }
-    if (upload.paused) return;
-    upload.progress = Math.min(100, upload.progress + 12 + Math.random() * 16);
-    if (upload.progress >= 100) {
-      clearInterval(interval);
-      upload.status = "scan pending";
-      try {
-        const formData = new FormData();
-        formData.append("channelId", upload.channelId);
-        formData.append("originalName", upload.name);
-        formData.append("mime", upload.file.type || "application/octet-stream");
-        formData.append("sizeBytes", String(upload.size));
-        formData.append("extractedText", upload.name);
-        formData.append("file", upload.file, upload.name);
-        const payload = await apiForm("/api/files/upload", formData);
-        await api(`/api/files/${payload.fileId}/scan`, { method: "POST" });
-        state.uploads = state.uploads.filter((item) => item.id !== upload.id);
-        if (upload.channelId === state.activeChannelId) state.messageScroll.nearBottom = true;
-        await refresh({ preserveMessages: false, pinToBottom: upload.channelId === state.activeChannelId });
-        toast("File stored", upload.name);
-      } catch (error) {
-        upload.status = "failed";
-        toast("Upload failed", error.message);
-      }
-    }
+async function startUpload(uploadId) {
+  const upload = state.uploads.find((item) => item.id === uploadId);
+  if (!upload) return;
+
+  try {
+    upload.status = "uploading";
+    upload.progress = 25;
     render();
-  }, 650);
+
+    const formData = new FormData();
+    formData.append("channelId", upload.channelId);
+    formData.append("originalName", upload.name);
+    formData.append("mime", upload.file.type || "application/octet-stream");
+    formData.append("sizeBytes", String(upload.size));
+    formData.append("extractedText", upload.name);
+    if (upload.messageBody) {
+      formData.append("messageBody", upload.messageBody);
+    }
+    formData.append("file", upload.file, upload.name);
+
+    upload.progress = 65;
+    render();
+
+    const payload = await apiForm("/api/files/upload", formData);
+    upload.progress = 90;
+    upload.status = "scan pending";
+    render();
+
+    await api(`/api/files/${payload.fileId}/scan`, { method: "POST" });
+    upload.progress = 100;
+    state.uploads = state.uploads.filter((item) => item.id !== upload.id);
+
+    if (upload.channelId === state.activeChannelId) {
+      state.messageScroll.nearBottom = true;
+    }
+    await refresh({ preserveMessages: false, pinToBottom: upload.channelId === state.activeChannelId });
+    playNotificationChime();
+    toast("✓ Attachment Sent", upload.name);
+  } catch (error) {
+    upload.status = "failed";
+    toast("Upload failed", error.message);
+    render();
+  }
 }
 
 function pauseUpload(uploadId) {
@@ -5053,6 +5227,133 @@ function exportJson(filename, value) {
   URL.revokeObjectURL(url);
 }
 
+function handleIncomingTyping(eventData) {
+  if (!data || !data.channels) return;
+  const channel = data.channels.find((c) => c.id === eventData.channelId);
+  if (!channel) return;
+  channel.typingUserIds = channel.typingUserIds || [];
+  if (eventData.typing) {
+    if (!channel.typingUserIds.includes(eventData.userId)) {
+      channel.typingUserIds.push(eventData.userId);
+    }
+    setTimeout(() => {
+      if (channel.typingUserIds) {
+        channel.typingUserIds = channel.typingUserIds.filter((id) => id !== eventData.userId);
+        if (eventData.channelId === state.activeChannelId) render();
+      }
+    }, 6000);
+  } else {
+    channel.typingUserIds = channel.typingUserIds.filter((id) => id !== eventData.userId);
+  }
+  if (eventData.channelId === state.activeChannelId) {
+    render();
+  }
+}
+
+function initLiveStream() {
+  if (liveEventSource) {
+    liveEventSource.close();
+    liveEventSource = null;
+  }
+  if (!currentUser()) return;
+
+  clearTimeout(liveReconnectTimer);
+  liveReconnectTimer = null;
+  try {
+    liveEventSource = new EventSource("/api/events");
+
+    liveEventSource.addEventListener("connected", () => {
+      // Live event stream active
+    });
+
+    liveEventSource.addEventListener("message:created", async (evt) => {
+      try {
+        const payload = JSON.parse(evt.data || "{}");
+        const eventData = payload.data || {};
+        if (eventData.channelId === state.activeChannelId) {
+          await refresh({ preserveMessages: false, pinToBottom: state.messageScroll.nearBottom });
+        } else {
+          await refresh({ background: true });
+        }
+      } catch {
+        await refresh({ background: true });
+      }
+    });
+
+    liveEventSource.addEventListener("message:edited", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("message:deleted", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("reaction:updated", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("message:acknowledged", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("file:uploaded", async (evt) => {
+      try {
+        const payload = JSON.parse(evt.data || "{}");
+        const eventData = payload.data || {};
+        if (eventData.channelId === state.activeChannelId) {
+          await refresh({ preserveMessages: false, pinToBottom: state.messageScroll.nearBottom });
+        } else {
+          await refresh({ background: true });
+        }
+      } catch {
+        await refresh({ background: true });
+      }
+    });
+
+    liveEventSource.addEventListener("file:updated", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("file:deleted", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("channel:updated", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("channel:read", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("user:updated", async () => {
+      await refresh({ background: true });
+    });
+
+    liveEventSource.addEventListener("channel:typing", (evt) => {
+      try {
+        const payload = JSON.parse(evt.data || "{}");
+        const eventData = payload.data || {};
+        if (eventData.channelId === state.activeChannelId && eventData.userId !== currentUser()?.id) {
+          handleIncomingTyping(eventData);
+        }
+      } catch {}
+    });
+
+    liveEventSource.onerror = () => {
+      if (liveEventSource) {
+        liveEventSource.close();
+        liveEventSource = null;
+      }
+      clearTimeout(liveReconnectTimer);
+      liveReconnectTimer = setTimeout(initLiveStream, 3000);
+    };
+  } catch (err) {
+    clearTimeout(liveReconnectTimer);
+    liveReconnectTimer = setTimeout(initLiveStream, 5000);
+  }
+}
+
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   navigator.serviceWorker.register("./sw.js").catch(() => {});
 }
@@ -5061,6 +5362,9 @@ init();
 
 refreshTimer = setInterval(() => {
   if (!currentUser() || state.loading) return;
+  if (!liveEventSource && !liveReconnectTimer) {
+    initLiveStream();
+  }
   const nextDayKey = localDayKey();
   if (nextDayKey !== currentDayKey) {
     currentDayKey = nextDayKey;
@@ -5069,8 +5373,14 @@ refreshTimer = setInterval(() => {
     return;
   }
   refresh({ background: true }).catch(() => {});
-}, 60000);
+}, 5000);
 
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && currentUser() && !state.loading) {
+    if (!liveEventSource && !liveReconnectTimer) initLiveStream();
+    refresh({ background: true }).catch(() => {});
+  }
+});
 
 document.addEventListener("keydown", event => {
   if (!currentUser()) return;
@@ -5092,6 +5402,10 @@ document.addEventListener("keydown", event => {
     document.querySelector('[data-action="global-search"]')?.focus();
   }
   if (event.key === "Escape") {
+    if (state.previewFileId) {
+      closeAttachmentPreview();
+      return;
+    }
     if (state.showAddUserModal) {
       state.showAddUserModal = false;
       render();

@@ -7,6 +7,7 @@ import json
 import math
 import mimetypes
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -161,6 +162,42 @@ URL_SCHEME = "https" if SSL_CERT_FILE and SSL_KEY_FILE else "http"
 # configured to set X-Forwarded-Proto (and strip any client-supplied one) — never enable this if
 # the app is reachable directly, since a client could otherwise spoof that header.
 TRUST_PROXY_HEADERS = os.environ.get("TRUST_PROXY_HEADERS", "").strip().lower() in ("1", "true", "yes")
+
+
+class LiveEventBroker:
+    """Thread-safe event broker for streaming Server-Sent Events (SSE) to connected clients."""
+
+    def __init__(self) -> None:
+        self._subscribers: set[queue.Queue] = set()
+        self._lock = threading.Lock()
+
+    def subscribe(self, q: queue.Queue) -> None:
+        with self._lock:
+            self._subscribers.add(q)
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._lock:
+            self._subscribers.discard(q)
+
+    def broadcast(self, event_type: str, data: dict | None = None) -> None:
+        payload = {
+            "type": event_type,
+            "data": data or {},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            dead: list[queue.Queue] = []
+            for q in self._subscribers:
+                try:
+                    q.put_nowait(payload)
+                except Exception:
+                    dead.append(q)
+            for q in dead:
+                self._subscribers.discard(q)
+
+
+LIVE_BROKER = LiveEventBroker()
+
 SESSION_DAYS = int(os.environ.get("SESSION_DAYS", "14"))
 OAUTH_STATE_TTL_MINUTES = 10
 # Optional comma-separated allowlist for Google sign-in, e.g. "beenco.io". Empty = any verified email.
@@ -1594,6 +1631,13 @@ def serialize_message(conn: PostgresConnection, row: dict) -> dict:
 
 
 def serialize_file(row: dict) -> dict:
+    mime = normalized_mime(row.get("mime"))
+    ext = Path(row.get("original_name") or "").suffix.lower()
+    is_previewable = (
+        mime.startswith(("image/", "audio/", "video/", "text/"))
+        or mime in ("application/pdf", "application/json", "application/javascript", "application/xml", "application/x-yaml")
+        or ext in (".pdf", ".txt", ".md", ".json", ".csv", ".js", ".ts", ".py", ".html", ".css", ".xml", ".yaml", ".yml", ".sql", ".log")
+    )
     return {
         "id": row["id"],
         "channelId": row["channel_id"],
@@ -1608,7 +1652,7 @@ def serialize_file(row: dict) -> dict:
         "kind": row["kind"] or "file",
         "duration": row["duration"] or 0,
         "waveform": json_loads(row["waveform"], []),
-        "previewUrl": row["preview_data_url"] or (f"/api/files/{row['id']}/preview" if normalized_mime(row["mime"]).startswith(("image/", "audio/", "video/")) and row["status"] == "available" else ""),
+        "previewUrl": row["preview_data_url"] or (f"/api/files/{row['id']}/preview" if is_previewable and row["status"] == "available" else ""),
         "extractedText": row["extracted_text"] or "",
         "createdAt": row["created_at"],
     }
@@ -3051,6 +3095,36 @@ class PortalHandler(SimpleHTTPRequestHandler):
             return False
         return parsed.netloc.lower() == self.headers.get("Host", "").lower()
 
+    def stream_events(self, user: dict) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        client_queue: queue.Queue = queue.Queue(maxsize=100)
+        LIVE_BROKER.subscribe(client_queue)
+        try:
+            init_payload = json.dumps({"ok": True, "userId": user["id"]})
+            self.wfile.write(f"event: connected\ndata: {init_payload}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+            while True:
+                try:
+                    event = client_queue.get(timeout=15.0)
+                    evt_type = event.get("type", "message")
+                    evt_data = json.dumps(event)
+                    self.wfile.write(f"event: {evt_type}\ndata: {evt_data}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.error):
+            pass
+        finally:
+            LIVE_BROKER.unsubscribe(client_queue)
+
     def handle_api(self, method: str) -> None:
         if method in {"POST", "PATCH", "PUT", "DELETE"} and not self.same_origin_mutation():
             self.write_error(403, "Cross-origin state-changing requests are blocked.")
@@ -3058,6 +3132,23 @@ class PortalHandler(SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        if path == "/api/events" and method == "GET":
+            with closing(db()) as conn:
+                user = self.current_user(conn)
+                if not user:
+                    token_param = query.get("token", [""])[0].strip()
+                    if token_param:
+                        row = conn.execute(
+                            "SELECT users.* FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ? AND sessions.expires_at > ?",
+                            (token_param, utc_now()),
+                        ).fetchone()
+                        if row and row["is_active"]:
+                            user = row
+            if not user:
+                self.write_error(401, "Authentication required.")
+                return
+            self.stream_events(user)
+            return
         try:
             with closing(db()) as conn:
                 self.route_api(conn, method, path, query)
@@ -4178,6 +4269,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
                 role = "owner" if member_id == user["id"] else "member"
                 conn.execute("INSERT OR IGNORE INTO channel_members (channel_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)", (channel_id, member_id, role, utc_now()))
             write_audit(conn, user["id"], "channel.created", "channel", channel_id, {"type": channel_type}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("channel:updated", {"channelId": channel_id})
         self.write_json(201, {"ok": True, "channelId": channel_id})
 
     def create_dm(self, conn: PostgresConnection, user: dict) -> None:
@@ -4196,12 +4288,12 @@ class PortalHandler(SimpleHTTPRequestHandler):
             WHERE c.type = 'dm'
             """,
             (user["id"], other_id),
-        ).fetchone()
+        ).fetchall()
         if memberships:
-            self.write_json(200, {"ok": True, "channelId": memberships["id"]})
+            self.write_json(200, {"ok": True, "channelId": memberships[0]["id"]})
             return
-        channel_id = uid("dm")
-        name = f"{user['display_name']} and {other['display_name']}"
+        channel_id = uid("chan")
+        name = f"dm-{user['display_name']}-{other['display_name']}"
         slug = slugify(f"dm-{user['id']}-{other_id}")
         with conn.transaction():
             conn.execute(
@@ -4214,6 +4306,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             for member_id in (user["id"], other_id):
                 conn.execute("INSERT INTO channel_members (channel_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)", (channel_id, member_id, utc_now()))
             write_audit(conn, user["id"], "dm.created", "channel", channel_id, {"memberId": other_id}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("channel:updated", {"channelId": channel_id})
         self.write_json(201, {"ok": True, "channelId": channel_id})
 
     def add_channel_member(self, conn: PostgresConnection, user: dict, channel_id: str) -> None:
@@ -4508,6 +4601,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
                     )
                 write_audit(conn, user["id"], "tag.alert", "message", message_id, {"tags": hashtags, "channelId": channel_id, "isOro": is_oro}, self.client_ip(), self.headers.get("User-Agent", ""))
             write_audit(conn, user["id"], "message.created", "message", message_id, {"channelId": channel_id, "parentId": parent_id, "isUrgent": is_urgent}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("message:created", {"channelId": channel_id, "messageId": message_id, "authorId": user["id"], "isUrgent": is_urgent})
         self.write_json(201, {"ok": True, "messageId": message_id})
 
     def acknowledge_message(self, conn: PostgresConnection, user: dict, message_id: str) -> None:
@@ -4528,6 +4622,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             (now, user["id"], f'%"{message_id}"%'),
         )
         write_audit(conn, user["id"], "message.acknowledged", "message", message_id, {"channelId": row["channel_id"]}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("message:acknowledged", {"channelId": row["channel_id"], "messageId": message_id, "userId": user["id"]})
         self.write_json(200, {
             "ok": True,
             "messageId": message_id,
@@ -4556,6 +4651,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             conn.execute("INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)", (message_id, user["id"], emoji, utc_now()))
             action = "reaction.added"
         write_audit(conn, user["id"], action, "message", message_id, {"emoji": emoji}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("reaction:updated", {"channelId": message["channel_id"], "messageId": message_id})
         self.write_json(200, {"ok": True})
 
     def edit_message(self, conn: PostgresConnection, user: dict, message_id: str) -> None:
@@ -4579,6 +4675,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
         history.append({"body": row["body"], "editedAt": edited_at, "editorId": user["id"]})
         conn.execute("UPDATE messages SET body = ?, edited_at = ?, edit_history = ? WHERE id = ?", (new_body, edited_at, json_dumps(history), message_id))
         write_audit(conn, user["id"], "message.edited", "message", message_id, {"historyCount": len(history)}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("message:edited", {"channelId": row["channel_id"], "messageId": message_id})
         self.write_json(200, {"ok": True})
 
     def delete_message(self, conn: PostgresConnection, user: dict, message_id: str) -> None:
@@ -4591,6 +4688,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             return
         conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (utc_now(), message_id))
         write_audit(conn, user["id"], "message.deleted", "message", message_id, {}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("message:deleted", {"channelId": row["channel_id"], "messageId": message_id})
         self.write_json(200, {"ok": True})
 
     def create_file_upload(self, conn: PostgresConnection, user: dict) -> None:
@@ -4660,6 +4758,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             conn.execute("INSERT INTO messages (id, channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)", (message_id, channel_id, user["id"], body_text, utc_now()))
             conn.execute("INSERT INTO message_attachments (message_id, file_id) VALUES (?, ?)", (message_id, file_id))
             write_audit(conn, user["id"], "file.upload.completed", "file", file_id, {"protocol": "multipart", "storage": "local", "messageId": message_id, "checksum": checksum}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("file:uploaded", {"channelId": channel_id, "fileId": file_id, "messageId": message_id})
         self.write_json(201, {"ok": True, "fileId": file_id, "messageId": message_id})
 
     def create_file(self, conn: PostgresConnection, user: dict) -> None:
@@ -4739,6 +4838,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             conn.execute("INSERT INTO messages (id, channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)", (message_id, channel_id, user["id"], body_text, utc_now()))
             conn.execute("INSERT INTO message_attachments (message_id, file_id) VALUES (?, ?)", (message_id, file_id))
             write_audit(conn, user["id"], "file.upload.completed", "file", file_id, {"protocol": "local", "storage": "local", "messageId": message_id}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("file:uploaded", {"channelId": channel_id, "fileId": file_id, "messageId": message_id})
         self.write_json(201, {"ok": True, "fileId": file_id, "messageId": message_id})
 
     def scan_file(self, conn: PostgresConnection, user: dict, file_id: str) -> None:
@@ -4756,6 +4856,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
         status = "quarantined" if risky else "available"
         conn.execute("UPDATE files SET status = ? WHERE id = ?", (status, file_id))
         write_audit(conn, user["id"], "file.scan.quarantined" if risky else "file.scan.clean", "file", file_id, {"scanner": "extension-policy", "status": status}, self.client_ip(), self.headers.get("User-Agent", ""))
+        LIVE_BROKER.broadcast("file:updated", {"fileId": file_id, "channelId": row["channel_id"], "status": status})
         self.write_json(200, {"ok": True, "status": status})
 
     def download_file(self, conn: PostgresConnection, user: dict, file_id: str) -> None:
@@ -4814,7 +4915,22 @@ class PortalHandler(SimpleHTTPRequestHandler):
             self.write_error(409, "File is not available.")
             return
         mime = normalized_mime(row["mime"])
-        if not (mime.startswith("image/") or mime.startswith("audio/") or mime.startswith("video/")):
+        filename = row["original_name"]
+        ext = Path(filename).suffix.lower()
+
+        if mime == "application/octet-stream" or not mime:
+            guessed, _ = mimetypes.guess_type(filename)
+            if guessed:
+                mime = guessed
+            elif ext in (".md", ".txt", ".log", ".sql", ".py", ".js", ".ts", ".html", ".css", ".json", ".yaml", ".yml", ".csv"):
+                mime = "text/plain"
+
+        is_previewable = (
+            mime.startswith(("image/", "audio/", "video/", "text/"))
+            or mime in ("application/pdf", "application/json", "application/javascript", "application/xml", "application/x-yaml")
+            or ext in (".pdf", ".txt", ".md", ".json", ".csv", ".js", ".ts", ".py", ".html", ".css", ".xml", ".yaml", ".yml", ".sql", ".log")
+        )
+        if not is_previewable:
             self.write_error(415, "Preview is not available for this file type.")
             return
         storage_path = upload_storage_path(row["channel_id"], row["id"], row["original_name"])
@@ -4822,8 +4938,13 @@ class PortalHandler(SimpleHTTPRequestHandler):
             self.write_error(410, "File data is not available on this server. Please re-upload the file.")
             return
         size = storage_path.stat().st_size
+        content_type = mime
+        if mime.startswith("text/") or ext in (".txt", ".md", ".json", ".csv", ".js", ".ts", ".py", ".html", ".css", ".xml", ".yaml", ".yml", ".sql", ".log"):
+            if "charset" not in content_type:
+                content_type += "; charset=utf-8"
+
         self.send_response(200)
-        self.send_header("Content-Type", mime)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{urllib.parse.quote(row['original_name'])}")
         self.end_headers()
@@ -4854,19 +4975,21 @@ class PortalHandler(SimpleHTTPRequestHandler):
         with conn.transaction():
             attached_msgs = conn.execute(
                 "SELECT message_id FROM message_attachments WHERE file_id = ?",
-                (file_id,)
+                (file_id,),
             ).fetchall()
-            for am in attached_msgs:
-                m_id = am["message_id"]
-                other_attachments = conn.execute(
-                    "SELECT COUNT(*) AS total FROM message_attachments WHERE message_id = ? AND file_id != ?",
-                    (m_id, file_id)
-                ).fetchone()["total"]
-                msg_row = conn.execute("SELECT body FROM messages WHERE id = ?", (m_id,)).fetchone()
-                if other_attachments == 0 and msg_row and msg_row["body"] in (f"Shared file **{file_name}**", "Voice message", ""):
-                    conn.execute("DELETE FROM messages WHERE id = ?", (m_id,))
 
             conn.execute("DELETE FROM message_attachments WHERE file_id = ?", (file_id,))
+
+            for msg_row in attached_msgs:
+                msg_id = msg_row["message_id"]
+                remaining = conn.execute(
+                    "SELECT COUNT(*) AS c FROM message_attachments WHERE message_id = ?",
+                    (msg_id,),
+                ).fetchone()["c"]
+                msg = conn.execute("SELECT body FROM messages WHERE id = ?", (msg_id,)).fetchone()
+                if remaining == 0 and msg and msg["body"].startswith("Shared file"):
+                    conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (utc_now(), msg_id))
+
             conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
 
             write_audit(
@@ -4882,6 +5005,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
         # Bytes go only after the rows are committed, so a failed delete never leaves a record
         # pointing at missing data.
         remove_upload_dir(channel_id, file_id)
+        LIVE_BROKER.broadcast("file:deleted", {"channelId": channel_id, "fileId": file_id})
         self.write_json(200, {"ok": True, "deletedFileId": file_id, "name": file_name})
 
     def create_event(self, conn: PostgresConnection, user: dict) -> None:
@@ -5203,6 +5327,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             if fields:
                 conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", [*params, target_id])
                 write_audit(conn, user["id"], "user.profile.updated", "user", target_id, {key: body[key] for key in profile_limits if key in body}, ip, agent)
+        LIVE_BROKER.broadcast("user:updated", {"userId": target_id})
         self.write_json(200, {"ok": True})
 
     def delete_user_endpoint(self, conn: PostgresConnection, user: dict, target_id: str) -> None:
@@ -5283,6 +5408,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             """,
             (now, user["id"], f'%"{channel_id}"%'),
         )
+        LIVE_BROKER.broadcast("channel:read", {"channelId": channel_id, "userId": user["id"]})
         self.write_json(200, {"ok": True, "lastReadMessageId": target_message_id})
 
     def update_typing(self, conn: PostgresConnection, user: dict, channel_id: str) -> None:
@@ -5296,6 +5422,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
             "UPDATE channel_members SET typing_until = ? WHERE channel_id = ? AND user_id = ?",
             (typing_until, channel_id, user["id"]),
         )
+        LIVE_BROKER.broadcast("channel:typing", {"channelId": channel_id, "userId": user["id"], "displayName": user.get("display_name", ""), "typing": typing})
         self.write_json(200, {"ok": True, "typingUntil": typing_until})
 
     def update_retention(self, conn: PostgresConnection, user: dict) -> None:
