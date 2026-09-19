@@ -1074,6 +1074,15 @@ def ensure_schema_migrations(conn: PostgresConnection) -> None:
             )
         except Exception:
             pass
+    conn.execute(
+        """
+        UPDATE messages
+        SET deleted_at = CURRENT_TIMESTAMP
+        WHERE (body = 'Voice message' OR body LIKE 'Voice message%')
+          AND id NOT IN (SELECT message_id FROM message_attachments)
+          AND (deleted_at IS NULL OR deleted_at = '')
+        """
+    )
 
 
 def ensure_default_workspace(conn: PostgresConnection) -> None:
@@ -4712,12 +4721,15 @@ class PortalHandler(SimpleHTTPRequestHandler):
             self.write_error(403, "No access to this channel.")
             return
         content = uploaded["content"]
+        upload_kind = str(fields.get("kind") or "file").strip().lower()
+        if upload_kind not in {"file", "voice"}:
+            upload_kind = "file"
         body = {
             "channelId": channel_id,
             "originalName": fields.get("originalName") or uploaded["filename"],
             "mime": fields.get("mime") or uploaded["contentType"],
             "sizeBytes": len(content),
-            "kind": "file",
+            "kind": upload_kind,
             "extractedText": fields.get("extractedText") or uploaded["filename"],
             "messageBody": fields.get("messageBody") or "",
         }
@@ -4732,6 +4744,20 @@ class PortalHandler(SimpleHTTPRequestHandler):
 
         file_id = uid("file")
         original_name = metadata["originalName"]
+        kind = metadata["kind"]
+        try:
+            duration = max(0, min(int(fields.get("duration", 0) or 0), 3600))
+        except (TypeError, ValueError):
+            duration = 0
+        raw_waveform = fields.get("waveform", "[]")
+        try:
+            waveform = json.loads(raw_waveform) if isinstance(raw_waveform, str) else raw_waveform
+            if not isinstance(waveform, list):
+                waveform = []
+        except Exception:
+            waveform = []
+        status = "available" if kind == "voice" else "pending"
+
         storage_path = upload_storage_path(channel_id, file_id, original_name)
         storage_path.parent.mkdir(parents=True, exist_ok=True)
         storage_path.write_bytes(content)
@@ -4750,7 +4776,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
                   id, channel_id, uploader_id, original_name, mime, size_bytes, status, checksum,
                   version, storage_key, kind, duration, waveform, preview_data_url, extracted_text, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 'file', 0, '[]', '', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
                 """,
                 (
                     file_id,
@@ -4759,16 +4785,20 @@ class PortalHandler(SimpleHTTPRequestHandler):
                     original_name,
                     metadata["mime"],
                     len(content),
+                    status,
                     checksum,
                     version,
                     storage_key,
+                    kind,
+                    duration,
+                    json_dumps(waveform),
                     body.get("extractedText", original_name),
                     utc_now(),
                 ),
             )
             if not attach_only:
                 message_id = uid("msg")
-                body_text = body.get("messageBody") or f"Shared file **{original_name}**"
+                body_text = fields.get("messageBody") or ("Voice message" if kind == "voice" else f"Shared file **{original_name}**")
                 conn.execute("INSERT INTO messages (id, channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)", (message_id, channel_id, user["id"], body_text, utc_now()))
                 conn.execute("INSERT INTO message_attachments (message_id, file_id) VALUES (?, ?)", (message_id, file_id))
                 write_audit(conn, user["id"], "file.upload.completed", "file", file_id, {"protocol": "multipart", "storage": "local", "messageId": message_id, "checksum": checksum}, self.client_ip(), self.headers.get("User-Agent", ""))
@@ -4823,6 +4853,8 @@ class PortalHandler(SimpleHTTPRequestHandler):
         else:
             size = metadata["sizeBytes"]
             checksum = hashlib.sha256(f"{file_id}:{original_name}".encode()).hexdigest()
+        status = "available" if kind == "voice" else "pending"
+        stored_preview_url = "" if (kind == "voice" and audio_bytes is not None) else preview_data_url
         # The bytes are already on disk by this point; the file/message/attachment rows below
         # must land together or the UI would show a message with a broken attachment link.
         with conn.transaction():
@@ -4832,7 +4864,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
                   id, channel_id, uploader_id, original_name, mime, size_bytes, status, checksum,
                   version, storage_key, kind, duration, waveform, preview_data_url, extracted_text, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     file_id,
@@ -4841,13 +4873,14 @@ class PortalHandler(SimpleHTTPRequestHandler):
                     original_name,
                     metadata["mime"],
                     size,
+                    status,
                     checksum,
                     version,
                     f"{channel_id}/{file_id}/{original_name}",
                     kind,
                     duration,
                     json_dumps(waveform),
-                    preview_data_url,
+                    stored_preview_url,
                     body.get("extractedText", original_name),
                     utc_now(),
                 ),
@@ -5009,6 +5042,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
 
             conn.execute("DELETE FROM message_attachments WHERE file_id = ?", (file_id,))
 
+            deleted_msg_ids = []
             for msg_row in attached_msgs:
                 msg_id = msg_row["message_id"]
                 remaining = conn.execute(
@@ -5016,8 +5050,11 @@ class PortalHandler(SimpleHTTPRequestHandler):
                     (msg_id,),
                 ).fetchone()["c"]
                 msg = conn.execute("SELECT body FROM messages WHERE id = ?", (msg_id,)).fetchone()
-                if remaining == 0 and msg and msg["body"].startswith("Shared file"):
-                    conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (utc_now(), msg_id))
+                if remaining == 0 and msg:
+                    mbody = str(msg["body"] or "")
+                    if mbody.startswith("Shared file") or mbody == "Voice message" or mbody.startswith("Voice message"):
+                        conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (utc_now(), msg_id))
+                        deleted_msg_ids.append(msg_id)
 
             conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
 
@@ -5035,6 +5072,8 @@ class PortalHandler(SimpleHTTPRequestHandler):
         # pointing at missing data.
         remove_upload_dir(channel_id, file_id)
         LIVE_BROKER.broadcast("file:deleted", {"channelId": channel_id, "fileId": file_id})
+        for d_msg_id in deleted_msg_ids:
+            LIVE_BROKER.broadcast("message:deleted", {"channelId": channel_id, "messageId": d_msg_id})
         self.write_json(200, {"ok": True, "deletedFileId": file_id, "name": file_name})
 
     def create_event(self, conn: PostgresConnection, user: dict) -> None:

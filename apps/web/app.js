@@ -1138,8 +1138,8 @@ function renderUrgentTopbarButton() {
     <button class="topbar-urgent-banner-btn" data-action="acknowledge-message" data-message-id="${topMsg.id}" title="Click to acknowledge urgent message from ${esc(author.displayName)}">
       <span class="pulse-siren">🚨</span>
       <strong>URGENT (${unack.length}):</strong>
-      <span>${esc(author.displayName)}: "${esc(topMsg.body.slice(0, 30))}"</span>
-      <span class="topbar-ack-action-badge">✓ PRESS TO ACKNOWLEDGE</span>
+      <span class="topbar-urgent-text">${esc(author.displayName)}: "${esc(topMsg.body.slice(0, 24))}"</span>
+      <span class="topbar-ack-action-badge">✓ ACK</span>
     </button>
   `;
 }
@@ -1693,7 +1693,7 @@ function renderShell() {
         </header>
         <nav class="conversation-tabs" aria-label="Conversation tabs">
           <button class="is-active" data-action="workspace-view" data-view="${fullView ? mode : "home"}">${chatIcon(fullView ? mode === "files" ? "files" : mode === "calendar" ? "calendar" : mode === "reports" ? "sparkles" : mode === "briefing" ? "terminal" : "activity" : "dm")}${fullView ? "All" : "Messages"}</button>
-          ${!fullView ? `<button data-action="open-panel" data-panel="files">${chatIcon("files")}Files</button><button data-action="open-panel" data-panel="people">${chatIcon("people")}Members</button>` : ""}
+          ${!fullView ? `<button data-action="open-panel" data-panel="files">${chatIcon("files")}Files</button><button data-action="open-panel" data-panel="activity">${chatIcon("activity")}Recent Activity</button><button data-action="open-panel" data-panel="people">${chatIcon("people")}Members</button>` : ""}
         </nav>
         <section class="message-scroll ${fullView ? "collection-content" : ""}" id="messageScroll" aria-label="${fullView ? "Workspace content" : "Messages"}">${mode === "activity" ? renderActivityPanel() : mode === "files" ? renderFilesPanel() : mode === "threads" ? renderThreadsView() : mode === "calendar" ? renderMonthlyCalendarView() : mode === "reports" ? renderAiReportsView() : mode === "briefing" ? renderBriefingView() : mode === "xmentions" ? renderXMentionsView() : renderMessages()}</section>
         ${fullView ? "" : renderComposer()}
@@ -1813,7 +1813,8 @@ function renderMessages() {
 function renderMessage(message, compact = false) {
   const author = userById(message.authorId);
   const replies = data.messages.filter((item) => item.parentId === message.id && !item.deletedAt);
-  const deleted = Boolean(message.deletedAt);
+  const isOrphanVoice = (message.body === "Voice message" || String(message.body || "").startsWith("Voice message")) && (!message.attachments || !message.attachments.length);
+  const deleted = Boolean(message.deletedAt) || isOrphanVoice;
   const isUrgent = Boolean(message.isUrgent);
   const ackUser = message.acknowledgedBy ? userById(message.acknowledgedBy) : null;
   return `
@@ -2211,9 +2212,9 @@ function renderComposer() {
       </div>
       <div class="composer-tools">
         ${state.composerUrgent ? `<span class="urgent-draft-pill">⚠️ Marked Important to Read &mdash; pings channel members every 30 minutes until acknowledged</span>` : `<span>Enter to send · Shift + Enter for a new line · Markdown supported</span>`}
-        ${state.voice.recording ? `<span class="status pending">Recording ${state.voice.elapsed}s</span>` : ""}
+        ${state.voice.recording ? `<span class="status pending voice-recording-status">Recording ${state.voice.elapsed}s</span>` : ""}
       </div>
-      ${state.voice.recording ? renderWaveform(state.voice.waveform) : ""}
+      <div class="voice-waveform-container">${state.voice.recording ? renderWaveform(state.voice.waveform) : ""}</div>
       ${renderUploads()}
     </footer>
   `;
@@ -2276,6 +2277,7 @@ function renderDetails() {
   // scrollbar hidden and no indication there was more to scroll to.
   const tabs = [
     ["thread", "Thread"],
+    ["activity", "Recent Activity"],
     ["notifications", `Alerts${unreadCount > 0 ? ` (${unreadCount})` : ""}`],
     ["files", "Files"],
     ["people", "People"],
@@ -2572,8 +2574,8 @@ function renderSearchPanel() {
         ${chatIcon("search")}
         <input data-action="global-search" value="${esc(state.searchQuery)}" placeholder="Search across people, channels, files, workflows, and more" autocomplete="off" aria-label="Search Beenco" />
         <button class="search-filter-btn" type="button" title="Search filters" aria-label="Search filters">≡</button>
-        ${rawQuery ? `<button class="search-clear-btn" type="button" data-action="clear-global-search" title="Clear search" aria-label="Clear search">✕</button>` : ""}
-        <button class="search-clear-btn" type="button" data-action="close-details" title="Close search" aria-label="Close search">✕</button>
+        ${rawQuery ? `<button class="search-clear-query-btn" type="button" data-action="clear-global-search" title="Clear search text" aria-label="Clear search text">Clear</button>` : ""}
+        <button class="search-clear-btn" type="button" data-action="close-details" title="Close search (Esc)" aria-label="Close search">✕</button>
       </div>
       <div class="slack-search-scope">${chatIcon("search")}<span>Search in</span><strong>${esc(channelName(activeChannel()))}</strong><kbd>Enter</kbd></div>
       ${!query ? `
@@ -5483,7 +5485,10 @@ async function startVoiceRecording() {
   recordingTimer = setInterval(() => {
     state.voice.elapsed += 1;
     state.voice.waveform.push(8 + Math.round(Math.random() * 26));
-    render();
+    const statusEl = document.querySelector(".voice-recording-status");
+    if (statusEl) statusEl.textContent = `Recording ${state.voice.elapsed}s`;
+    const waveEl = document.querySelector(".voice-waveform-container");
+    if (waveEl) waveEl.innerHTML = renderWaveform(state.voice.waveform);
   }, 1000);
   render();
 }
@@ -5545,30 +5550,53 @@ function makeFallbackVoiceDataUrl(durationSeconds) {
 async function createVoiceMessage(blob) {
   const duration = Math.max(1, state.voice.elapsed);
   const waveform = state.voice.waveform;
-  const previewDataUrl = blob ? await blobToDataUrl(blob) : makeFallbackVoiceDataUrl(duration);
-  const sizeBytes = blob?.size || Math.round((previewDataUrl.length * 3) / 4);
-  const mime = blob?.type || "audio/wav";
-  const extension = mime.includes("wav") ? "wav" : "webm";
   state.voice = { recording: false, elapsed: 0, waveform: [] };
-  const payload = await api("/api/files", {
-    method: "POST",
-    body: {
-      channelId: state.activeChannelId,
-      originalName: `voice-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`,
-      mime,
-      sizeBytes,
-      kind: "voice",
-      duration,
-      waveform,
-      previewDataUrl,
-      extractedText: "voice message audio clip",
-      messageBody: "Voice message"
+  render();
+
+  try {
+    const mime = blob?.type || "audio/webm";
+    const extension = mime.includes("wav") ? "wav" : (mime.includes("mp4") || mime.includes("m4a") ? "m4a" : (mime.includes("ogg") ? "ogg" : "webm"));
+    const filename = `voice-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`;
+
+    if (blob && blob.size > 0) {
+      const formData = new FormData();
+      formData.append("channelId", state.activeChannelId);
+      formData.append("originalName", filename);
+      formData.append("mime", mime);
+      formData.append("kind", "voice");
+      formData.append("duration", String(duration));
+      formData.append("waveform", JSON.stringify(waveform));
+      formData.append("messageBody", "Voice message");
+      formData.append("file", blob, filename);
+
+      await apiForm("/api/files/upload", formData);
+    } else {
+      const previewDataUrl = makeFallbackVoiceDataUrl(duration);
+      const sizeBytes = Math.round((previewDataUrl.length * 3) / 4);
+      const payload = await api("/api/files", {
+        method: "POST",
+        body: {
+          channelId: state.activeChannelId,
+          originalName: filename,
+          mime: "audio/wav",
+          sizeBytes,
+          kind: "voice",
+          duration,
+          waveform,
+          previewDataUrl,
+          extractedText: "voice message audio clip",
+          messageBody: "Voice message"
+        }
+      });
+      await api(`/api/files/${payload.fileId}/scan`, { method: "POST" }).catch(() => {});
     }
-  });
-  await api(`/api/files/${payload.fileId}/scan`, { method: "POST" });
-  state.messageScroll.nearBottom = true;
-  await refresh({ preserveMessages: false, pinToBottom: true });
-  toast("Voice message stored", `${duration}s audio clip`);
+
+    state.messageScroll.nearBottom = true;
+    await refresh({ preserveMessages: false, pinToBottom: true });
+    toast("Voice message sent", `${duration}s audio clip`);
+  } catch (error) {
+    handleVoiceMessageError(error);
+  }
 }
 
 function exportJson(filename, value) {
@@ -5816,5 +5844,33 @@ document.addEventListener("keydown", event => {
     state.ui.detailsOpen = false;
     state.ui.sidebarOpen = false;
     render();
+  }
+});
+
+document.addEventListener("paste", (event) => {
+  if (!currentUser() || !state.activeChannelId) return;
+  const clipboardData = event.clipboardData;
+  if (!clipboardData || !clipboardData.items) return;
+
+  const files = [];
+  for (let i = 0; i < clipboardData.items.length; i++) {
+    const item = clipboardData.items[i];
+    if (item.type && item.type.startsWith("image/")) {
+      const blob = item.getAsFile();
+      if (blob) {
+        let name = blob.name || "";
+        const ext = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg");
+        if (!name || name === "image.png" || !name.includes(".")) {
+          name = `pasted-image-${Date.now()}.${ext}`;
+        }
+        files.push(new File([blob], name, { type: blob.type }));
+      }
+    }
+  }
+
+  if (files.length > 0) {
+    event.preventDefault();
+    queueUploads(files);
+    toast("Image pasted", `${files.length} image attachment added.`);
   }
 });

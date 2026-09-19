@@ -186,9 +186,9 @@
       font-weight: 600;
       color: var(--neon-green);
       margin-top: 2px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      word-break: break-word;
+      line-height: 1.35;
     }
 
     /* Main Container */
@@ -1638,10 +1638,18 @@
       document.getElementById("exec-summary").innerText = meta.executiveSummary || "No executive summary available.";
 
       const km = meta.keyMetrics || {};
-      document.getElementById("metric-top-chain").innerText = km.topGrowingChain || "--";
-      document.getElementById("metric-stablecoin").innerText = km.stablecoinNetInflow || "--";
-      document.getElementById("metric-sentiment").innerText = km.marketSentiment || "--";
-      document.getElementById("metric-critical").innerText = km.criticalAlertsCount ?? "--";
+      const topChain = km.topGrowingChain || "--";
+      const stablecoin = km.stablecoinNetInflow || "--";
+      const sentiment = km.marketSentiment || "--";
+      const critical = km.criticalAlertsCount ?? "--";
+      const elTopChain = document.getElementById("metric-top-chain");
+      const elStablecoin = document.getElementById("metric-stablecoin");
+      const elSentiment = document.getElementById("metric-sentiment");
+      const elCritical = document.getElementById("metric-critical");
+      if (elTopChain) { elTopChain.innerText = topChain; elTopChain.title = topChain; }
+      if (elStablecoin) { elStablecoin.innerText = stablecoin; elStablecoin.title = stablecoin; }
+      if (elSentiment) { elSentiment.innerText = sentiment; elSentiment.title = sentiment; }
+      if (elCritical) { elCritical.innerText = critical; elCritical.title = String(critical); }
     }
 
     function renderSidebar() {
